@@ -8,7 +8,7 @@ void *array_base(const char *name, int type, long *bytes);
 int g_fg = 7, g_bg = 0;
 static int g_mode = 3;           /* SCREEN mode */
 static int g_on = 1;
-static int g_apage = 0, g_dpage = 0;
+static int g_apage = 0, g_dpage = 1;
 static int lastx = 0, lasty = 0;
 static int vx1 = 0, vy1 = 0, vx2 = 639, vy2 = 399;  /* view (logical) */
 static int win_on = 0;
@@ -116,7 +116,7 @@ void stmt_screen(void)
             if (accept(',')) { if (!at_stmt_end()) dp = eval_int(); }
         }
     }
-    if (mode < 0 || mode > 3 || ap < 0 || ap > 1 || dp < 0 || dp > 1) berror(E_ILLEGAL_FN);
+    if (mode < 0 || mode > 3 || ap < 0 || ap > 1 || dp < 0 || dp > 3) berror(E_ILLEGAL_FN);
     if (mode != g_mode) {
         g_mode = mode;
         vx1 = 0; vy1 = 0; vx2 = 639; vy2 = lines_of() - 1;
@@ -124,9 +124,11 @@ void stmt_screen(void)
         hal_gpage(0, 0);
         hal_gclear(0);
     }
+    /* display page is a bit mask: bit0 = page 0, bit1 = page 1 (0 = none) */
     g_apage = ap; g_dpage = dp;
-    hal_gpage(ap, dp);
-    if (sw >= 0) { g_on = (sw == 0); hal_gon(g_on); }
+    hal_gpage(ap, (dp & 1) ? 0 : (dp & 2) ? 1 : 0);
+    if (sw >= 0) g_on = (sw == 0);
+    hal_gon(g_on && dp != 0);
 }
 
 void stmt_color(void)

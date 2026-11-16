@@ -87,6 +87,7 @@ cursor = [0, False]   # address, visible
 exited = [False, 0]
 irq_pending = set()
 port_log = {}
+port_last = {}
 plane_bank = 0
 
 def inb(port):
@@ -107,6 +108,7 @@ def inb(port):
 def outb(port, val):
     global pic_mask, vsync_armed, beep, gdc_cmd, gdc_params
     port_log[port] = port_log.get(port, 0) + 1
+    port_last[port] = val
     if port == 0x02: pic_mask = val
     elif port == 0x64: vsync_armed = True
     elif port == 0x37:
@@ -429,3 +431,4 @@ if opt.gfx:
                 px[xb * 8 + bit, y] = pal[c]
     im.save(opt.gfx)
 print('ports:', {hex(k): v for k, v in sorted(port_log.items())})
+print('last:', {hex(k): hex(v) for k, v in sorted(port_last.items()) if k in (0xA2, 0xA4, 0xA6, 0x6A, 0x68)})
