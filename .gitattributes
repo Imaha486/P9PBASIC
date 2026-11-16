@@ -1,0 +1,9 @@
+# keep Shift_JIS / CR+LF files exactly as they are
+*.BAS -text
+*.TXT -text
+*.bat text eol=crlf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.py text eol=lf

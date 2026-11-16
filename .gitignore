@@ -1,0 +1,11 @@
+# build outputs
+obj/
+*.obj
+*.EXE
+*.exe
+*.map
+*.err
+dist/
+# local test files
+run/
+__pycache__/
