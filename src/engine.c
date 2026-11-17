@@ -146,16 +146,32 @@ static int materialize(P8Engine *e)
         if (files[i].attr & 0x80) {
             char *text, *report = 0;
             unsigned long tlen = 0;
-            if (dot) *(char *)dot = 0;
+            char matname[32];
+            if (dot) {
+                /* A tokenized file whose disk name carries an
+                 * extension (MENU.ALP) materializes as
+                 * MENU_ALP.BAS: writing MENU.BAS would collide
+                 * case-insensitively with a distinct program
+                 * named "menu" (iOS returns EEXIST), and the
+                 * guest only ever asks for the extension-less
+                 * name. */
+                char ext[4];
+                snprintf(ext, sizeof(ext), "%.3s", dot + 1);
+                *(char *)dot = 0;
+                snprintf(matname, sizeof(matname), "%.10s_%.3s.BAS",
+                         base, ext);
+            } else {
+                snprintf(matname, sizeof(matname), "%.15s.BAS", base);
+            }
             text = p88_convert(buf, (unsigned long)sz, &tlen, &report);
             free(report);
             if (!text) continue;
-            snprintf(path, sizeof(path), "%s/%.15s.BAS", e->workdir, base);
+            snprintf(path, sizeof(path), "%s/%s", e->workdir, matname);
             fp = fopen(path, "wb");
             if (fp) { fwrite(text, 1, tlen, fp); fclose(fp); }
             free(text);
             if (!e->bootfile[0] || strcmp(base, "MENU") == 0)
-                snprintf(e->bootfile, sizeof(e->bootfile), "%s.BAS", base);
+                snprintf(e->bootfile, sizeof(e->bootfile), "%s", matname);
         } else {
             snprintf(path, sizeof(path), "%s/%.15s", e->workdir, files[i].name);
             fp = fopen(path, "wb");
