@@ -390,6 +390,7 @@ static void exec_loop(void)
     for (;;) {
         u8 c;
         vessel_pump();      /* PMD playback advances while BASIC runs */
+        hal_poll();         /* embedded hosts may bail out here */
         str_temp_reset();
         if (running && hal_breakflag()) {
             if (exit_after_run) { /* stop running file: fall to editor */ exit_after_run = 0; }

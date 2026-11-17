@@ -13,6 +13,7 @@ void vessel_init(void);                            /* idempotent one-time setup 
 void vessel_exec(unsigned entry);                  /* run Z80 from entry until it RETs to a sentinel */
 long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de);
 long vessel_call_pushed(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de, unsigned pushed); /* call with preset registers */
+int  vessel_d88_sector(int t, int r, unsigned char *dst); /* raw D88 sector (t = cyl*2+head) */
 int  vessel_disk_read(int ltrack, int sector, int count, unsigned addr);
 int  vessel_dram_load(int ltrack, int tracks); /* FFDE service 0: raw sector read from P8P_DISK */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */

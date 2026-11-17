@@ -117,6 +117,13 @@ static int d88_read_sector(int t, int r, unsigned char *dst)
     return 0;
 }
 
+/* public raw sector access (track = cyl*2+head, r = sector id) for
+ * the Disk BASIC file layer (p88disk.c) */
+int vessel_d88_sector(int t, int r, unsigned char *dst)
+{
+    return d88_read_sector(t, r, dst);
+}
+
 /* ================= disk subsystem command processor ================= */
 
 /* output queue holds a whole read buffer plus a few status bytes */

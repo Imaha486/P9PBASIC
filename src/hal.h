@@ -36,6 +36,8 @@ int  hal_inp_direct(void);
 unsigned long hal_ticks(void);  /* ~ 1/60 sec units */
 void hal_beep(int on);
 void hal_idle(void);
+void hal_poll(void);            /* called once per statement; embedded
+                                   hosts use it to stop the engine */
 
 /* ---- ports / memory ---- */
 int  hal_inp(unsigned port);

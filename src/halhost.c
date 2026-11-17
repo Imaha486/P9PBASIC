@@ -152,3 +152,5 @@ void hal_gettime(int *h, int *m, int *s) { *h = 12; *m = 34; *s = 56; }
 void hal_getdate(int *y, int *mo, int *d) { *y = 2026; *mo = 11; *d = 16; }
 void hal_settime(int h, int m, int s) { (void)h; (void)m; (void)s; }
 void hal_setdate(int y, int mo, int d) { (void)y; (void)mo; (void)d; }
+
+void hal_poll(void) { }

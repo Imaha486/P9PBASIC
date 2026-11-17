@@ -58,6 +58,8 @@ ymfm::ym2608::output_data out;
 
 int enabled = -1;               /* -1 unknown, 0 off, 1 on */
 FILE *wav = nullptr;
+opna_sink_fn sink_fn = nullptr;
+void *sink_ctx = nullptr;
 uint32_t chip_rate = 0;
 uint32_t total_frames = 0;
 double res_pos = 0;             /* box-filter resampler position */
@@ -99,8 +101,12 @@ void wav_header(uint32_t data_bytes)
 
 void finalize(void)
 {
+    if (outfill) {
+        if (wav) fwrite(outbuf, 2, (size_t)outfill * 2, wav);
+        if (sink_fn) sink_fn(outbuf, outfill, sink_ctx);
+        outfill = 0;
+    }
     if (!wav) return;
-    if (outfill) { fwrite(outbuf, 2, (size_t)outfill * 2, wav); outfill = 0; }
     wav_header(total_frames * 4);
     fclose(wav);
     wav = nullptr;
@@ -111,16 +117,19 @@ bool ensure_init(void)
     if (enabled >= 0) return enabled == 1;
     enabled = 0;
     const char *path = getenv("P8PWAV");
-    if (!path || !*path) return false;
-    wav = fopen(path, "wb");
-    if (!wav) return false;
+    if (path && *path) {
+        wav = fopen(path, "wb");
+        if (wav) {
+            unsigned char zero[44] = {0};
+            fwrite(zero, 1, 44, wav);   /* patched by finalize() */
+            atexit(finalize);
+        }
+    }
+    if (!wav && !sink_fn) return false;
     chip.reset();
     chip.set_fidelity(ymfm::OPN_FIDELITY_MED);
     chip_rate = chip.sample_rate(CHIP_CLOCK);
-    unsigned char zero[44] = {0};
-    fwrite(zero, 1, 44, wav);   /* patched by finalize() */
     trace_audio = getenv("P8P_TRACE_AUDIO") != nullptr;
-    atexit(finalize);
     enabled = 1;
     return true;
 }
@@ -164,7 +173,11 @@ void push_frame(void)
     }
     outfill++;
     total_frames++;
-    if (outfill == 4096) { fwrite(outbuf, 2, 4096 * 2, wav); outfill = 0; }
+    if (outfill == 512) {
+        if (wav) fwrite(outbuf, 2, 512 * 2, wav);
+        if (sink_fn) sink_fn(outbuf, 512, sink_ctx);
+        outfill = 0;
+    }
 }
 
 } // namespace
@@ -173,6 +186,27 @@ extern "C" void opna_adpcm_a_write(unsigned long addr, int value)
 {
     if (addr < iface.adpcm_a_ram.size())
         iface.adpcm_a_ram[(size_t)addr] = (uint8_t)value;
+}
+
+extern "C" void opna_set_sink(opna_sink_fn fn, void *ctx)
+{
+    sink_fn = fn;
+    sink_ctx = ctx;
+    if (enabled == 0) enabled = -1;   /* re-probe on the next write */
+}
+
+extern "C" void opna_reset(void)
+{
+    std::fill(iface.adpcm_a_ram.begin(), iface.adpcm_a_ram.end(), 0);
+    std::fill(iface.adpcm_b_ram.begin(), iface.adpcm_b_ram.end(), 0);
+    g_ext_reads_a = g_ext_reads_b = g_ext_writes_b = 0;
+    res_pos = 0; last_l = last_r = 0;
+    frame_acc = 0; outfill = 0; total_frames = 0; sec_peak = 0;
+    if (enabled == 1) {
+        chip.reset();
+        chip.set_fidelity(ymfm::OPN_FIDELITY_MED);
+        chip_rate = chip.sample_rate(CHIP_CLOCK);
+    }
 }
 
 extern "C" void opna_write(int bank, int addr, int value)

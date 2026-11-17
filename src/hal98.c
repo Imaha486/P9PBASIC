@@ -327,6 +327,7 @@ unsigned long hal_ticks(void)
 
 void hal_beep(int on) { outp(0x37, on ? 0x06 : 0x07); }
 void hal_idle(void) { }
+void hal_poll(void) { }
 
 /* ---------------- ports / memory ---------------- */
 int hal_inp(unsigned port)
