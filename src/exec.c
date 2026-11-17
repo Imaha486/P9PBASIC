@@ -1,5 +1,6 @@
 /* exec.c - program storage, statement execution, direct mode */
 #include "basic.h"
+#include "vessel.h"
 #include <ctype.h>
 #include <math.h>
 
@@ -1312,10 +1313,32 @@ static void stmt_out(void)
  * Arguments are evaluated (for validation) and discarded.  XDF takes a bare
  * command name (letters, stored as plain characters by the tokenizer) before
  * the list.  Set P8P_TRACE_EXT to log each call to stderr. */
+/* Scratch area for synthesized PC-88 token streams (the Z80 extension
+ * handlers parse their arguments from a token stream, so the relay
+ * re-encodes the interpreter's evaluated arguments into one). */
+#define EXT_STREAM 0x8F00
+
+static unsigned ext_put(unsigned p, int byte)
+{
+    hal_poke(0, p, byte);
+    return (p + 1) & 0xFFFF;
+}
+
+static unsigned ext_put_num(unsigned p, long v)
+{
+    unsigned u = (unsigned)(v & 0xFFFF);
+    if (u <= 9) return ext_put(p, 0x11 + (int)u);   /* digit token */
+    p = ext_put(p, 0x1C);                            /* int16 constant */
+    p = ext_put(p, (int)(u & 0xFF));
+    return ext_put(p, (int)(u >> 8));
+}
+
 static void stmt_ext(int which)
 {
     static const char *nm[3] = { "XDD", "XDE", "XDF" };
     char cmd[16];
+    long nums[16];
+    int nnum = 0;
     int n = 0, args = 1;
     int tr = getenv("P8P_TRACE_EXT") != 0;
     cmd[0] = 0;
@@ -1336,6 +1359,7 @@ static void stmt_ext(int which)
         VAL v;
         if (at_stmt_end()) break;
         eval(&v);
+        if (v.type != T_STR && nnum < 16) nums[nnum++] = (long)val_to_dbl(&v);
         if (tr) {
             if (v.type == T_STR)
                 fprintf(stderr, " \"%.*s\"", (int)v.u.s.len, v.u.s.p ? v.u.s.p : "");
@@ -1346,6 +1370,25 @@ static void stmt_ext(int which)
         break;
     }
     if (tr) fputc('\n', stderr);
+
+    if (which == 2 && cmd[0] && hal_peek(0, 0xA5DF) == 0x7E) {
+        /* XDF: relay to NEOMSC's FFDF handler (HL = command letter). */
+        unsigned p = EXT_STREAM, i;
+        p = ext_put(p, 0xFF); p = ext_put(p, 0xDF); p = ext_put(p, 0x20);
+        for (i = 0; cmd[i]; i++) p = ext_put(p, (unsigned char)cmd[i]);
+        for (n = 0; n < nnum; n++) {
+            p = ext_put(p, 0x2C);
+            p = ext_put_num(p, nums[n]);
+        }
+        ext_put(p, 0x00);
+        vessel_call(0xA5DF, 0, EXT_STREAM + 3, EXT_STREAM, 0);
+    } else if (which == 1 && nnum >= 1) {
+        /* XDE: service 0 is the raw sector read (vessel_disk_read);
+         * services 1-3 are traced only for now. */
+        if (nums[0] == 0 && nnum >= 6)
+            vessel_disk_read((int)nums[2], (int)nums[3], (int)nums[4],
+                             (unsigned)(nums[5] & 0xFFFF));
+    }
 }
 
 static void stmt_wait(void)

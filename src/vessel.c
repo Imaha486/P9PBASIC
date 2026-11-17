@@ -352,6 +352,32 @@ static void emu_ret(void)
     cpu.sp = (uint16_t)(cpu.sp + 2);
 }
 
+/* Read a numeric literal from the token stream at HL (the forms the
+ * PC-88 tokenizer produces): digit tokens / ASCII digits, 0x0F int8,
+ * 0x1C int16, 0x0C / 0x0B u16. Returns the value; *php advances. */
+static long stream_number(unsigned *php)
+{
+    unsigned p = *php;
+    long v = 0;
+    int neg = 0, any = 0;
+    while (hal_peek(0, p) == 0x20) p++;
+    if (hal_peek(0, p) == 0x2D) { neg = 1; p++; }
+    for (;;) {
+        int b = hal_peek(0, p);
+        if (b >= 0x11 && b <= 0x1A) { v = v * 10 + (b - 0x11); p++; any = 1; }
+        else if (b >= '0' && b <= '9') { v = v * 10 + (b - '0'); p++; any = 1; }
+        else break;
+    }
+    if (!any) {
+        int b = hal_peek(0, p);
+        if (b == 0x0F) { v = (signed char)hal_peek(0, p + 1); p += 2; }
+        else if (b == 0x1C) { v = (short)(hal_peek(0, p + 1) | (hal_peek(0, p + 2) << 8)); p += 3; }
+        else if (b == 0x0C || b == 0x0B) { v = hal_peek(0, p + 1) | (hal_peek(0, p + 2) << 8); p += 3; }
+    }
+    *php = p & 0xFFFF;
+    return neg ? -v : v;
+}
+
 /* check PC traps: -1 = stop, 1 = handled (PC changed), 0 = execute normally */
 static int trap(void)
 {
@@ -360,8 +386,38 @@ static int trap(void)
     if (pc == 0x0008) {     /* RST 8: inline service byte follows the RST */
         ret = rd16(cpu.sp);
         if (tracing()) { fprintf(stderr, "VESSEL RST8 svc %02X at %04X", hal_peek(0, ret), ret); trace_regs(); }
+        if (hal_peek(0, ret) == 0x2C) {
+            /* svc 0x2C: skip the separator at HL, evaluate the next
+             * argument and leave its descriptor at (0xEC41):
+             * [type, lo, hi]. The driver's readers fetch it from there. */
+            unsigned p = (unsigned)cpu.h << 8 | cpu.l;
+            long v;
+            while (hal_peek(0, p) == 0x20) p++;
+            if (hal_peek(0, p) == 0x2C) p++;
+            while (hal_peek(0, p) == 0x20) p++;
+            v = stream_number(&p);
+            hal_poke(0, 0xEC44, 2);
+            hal_poke(0, 0xEC45, (int)(v & 0xFF));
+            hal_poke(0, 0xEC46, (int)((v >> 8) & 0xFF));
+            cpu.h = (uint8_t)(p >> 8); cpu.l = (uint8_t)p;
+        }
         cpu.sp = (uint16_t)(cpu.sp + 2);
         cpu.pc = (uint16_t)((ret + 1) & 0xFFFF);
+        return 1;
+    }
+    if (pc == 0x18A3) {     /* ROM: fetch the evaluated value's low byte -> A */
+        cpu.a = (uint8_t)hal_peek(0, 0xEC45);
+        cpu.e = (uint8_t)hal_peek(0, 0xEC45);
+        cpu.d = (uint8_t)hal_peek(0, 0xEC46);
+        emu_ret();
+        return 1;
+    }
+    if (pc == 0xA794) {     /* NEOMSC's argument fetch (a slot the ROM's
+                             * registration call patches on hardware):
+                             * DE = the evaluated 16-bit argument. */
+        cpu.e = (uint8_t)hal_peek(0, 0xEC45);
+        cpu.d = (uint8_t)hal_peek(0, 0xEC46);
+        emu_ret();
         return 1;
     }
     if (pc == 0x37C9 || pc == 0x37CC) { subsys_command(cpu.a); emu_ret(); return 1; }  /* PUTCOM */
@@ -395,6 +451,13 @@ void vessel_init(void)
     cpu.port_in = io_in;
     cpu.port_out = io_out;
     cpu.userdata = 0;
+    /* The interpreter's evaluated-argument descriptor lives at (0xEC41);
+     * point it at a scratch block the RST 8 trap fills in. */
+    hal_poke(0, 0xEC41, 0x44);
+    hal_poke(0, 0xEC42, 0xEC);
+    hal_poke(0, 0xEC44, 0);
+    hal_poke(0, 0xEC45, 0);
+    hal_poke(0, 0xEC46, 0);
 }
 
 static long run_loop(void)
@@ -448,6 +511,26 @@ long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned 
     if (tracing()) fprintf(stderr, "VESSEL call %04X A=%02X HL=%04X BC=%04X DE=%04X\n",
                                entry & 0xFFFF, a & 0xFF, hl & 0xFFFF, bc & 0xFFFF, de & 0xFFFF);
     return run_loop();
+}
+
+/* FFDE service 0 equivalent: read count 256-byte sectors starting at
+ * (logical track, sector) from the P8P_DISK image into guest memory.
+ * Logical track = cylinder * 2 + head, sector = 1..16 (D88 order).
+ * Returns the number of sectors read. */
+int vessel_disk_read(int ltrack, int sector, int count, unsigned addr)
+{
+    unsigned char buf[256];
+    int i, t = ltrack, r = sector;
+    for (i = 0; i < count; i++) {
+        int j;
+        if (!d88_read_sector(t, r, buf)) break;
+        for (j = 0; j < 256; j++) hal_poke(0, (addr + (unsigned)i * 256u + (unsigned)j) & 0xFFFF, buf[j]);
+        if (++r > 16) { r = 1; t++; }
+    }
+    if (tracing()) fprintf(stderr, "VESSEL disk_read track %d sec %d count %d -> %04X (%d read)\n",
+                           ltrack, sector, count, addr, i);
+    if (i > 0) vessel_notify_load(addr, (long)i * 256L);
+    return i;
 }
 
 void vessel_notify_load(unsigned addr, long len)
