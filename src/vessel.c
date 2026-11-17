@@ -397,10 +397,29 @@ void vessel_init(void)
     cpu.userdata = 0;
 }
 
-void vessel_exec(unsigned entry)
+static long run_loop(void)
 {
     long n;
     int t;
+    int steps = getenv("P8P_TRACE_STEPS") != 0;
+    for (n = 0; n < STEP_CAP; n++) {
+        t = trap();
+        if (t < 0) return n;
+        if (t > 0) continue;
+        if (steps) fprintf(stderr, "STEP %04X %02X\n", (unsigned)cpu.pc, hal_peek(0, cpu.pc));
+        z80_step(&cpu);
+        if (cpu.halted) {
+            fprintf(stderr, "VESSEL HALT at %04X, stopped\n", (unsigned)cpu.pc);
+            return n;
+        }
+    }
+    fprintf(stderr, "VESSEL step cap reached at %04X, stopped\n", (unsigned)cpu.pc);
+    return -1;
+}
+
+void vessel_exec(unsigned entry)
+{
+    long n;
     vessel_init();
     cpu.halted = 0;
     cpu.sp = (uint16_t)(STACK_INIT - 2);
@@ -408,20 +427,27 @@ void vessel_exec(unsigned entry)
     hal_poke(0, cpu.sp + 1, SENTINEL >> 8);
     cpu.pc = (uint16_t)(entry & 0xFFFF);
     if (tracing()) fprintf(stderr, "VESSEL exec %04X\n", entry & 0xFFFF);
-    for (n = 0; n < STEP_CAP; n++) {
-        t = trap();
-        if (t < 0) {
-            if (tracing()) fprintf(stderr, "VESSEL returned after %ld steps\n", n);
-            return;
-        }
-        if (t > 0) continue;
-        z80_step(&cpu);
-        if (cpu.halted) {
-            fprintf(stderr, "VESSEL HALT at %04X, stopped\n", (unsigned)cpu.pc);
-            return;
-        }
-    }
-    fprintf(stderr, "VESSEL step cap reached at %04X, stopped\n", (unsigned)cpu.pc);
+    n = run_loop();
+    if (tracing() && n >= 0) fprintf(stderr, "VESSEL returned after %ld steps\n", n);
+}
+
+/* Call a driver entry with preset registers (hook experiments and,
+ * later, the extension statement relay). Returns the step count. */
+long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de)
+{
+    vessel_init();
+    cpu.halted = 0;
+    cpu.sp = (uint16_t)(STACK_INIT - 2);
+    hal_poke(0, cpu.sp, SENTINEL & 0xFF);
+    hal_poke(0, cpu.sp + 1, SENTINEL >> 8);
+    cpu.a = (uint8_t)a;
+    cpu.h = (uint8_t)(hl >> 8); cpu.l = (uint8_t)hl;
+    cpu.b = (uint8_t)(bc >> 8); cpu.c = (uint8_t)bc;
+    cpu.d = (uint8_t)(de >> 8); cpu.e = (uint8_t)de;
+    cpu.pc = (uint16_t)(entry & 0xFFFF);
+    if (tracing()) fprintf(stderr, "VESSEL call %04X A=%02X HL=%04X BC=%04X DE=%04X\n",
+                               entry & 0xFFFF, a & 0xFF, hl & 0xFFFF, bc & 0xFFFF, de & 0xFFFF);
+    return run_loop();
 }
 
 void vessel_notify_load(unsigned addr, long len)

@@ -7,6 +7,7 @@
 
 void vessel_init(void);                            /* idempotent one-time setup */
 void vessel_exec(unsigned entry);                  /* run Z80 from entry until it RETs to a sentinel */
+long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de); /* call with preset registers */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */
 
 /* The PC-88 port model, shared by the Z80 and by BASIC's own INP/OUT
