@@ -147,7 +147,11 @@ P8PBASIC は PC-88 インタプリタとして機能させ、器ごと RetroDOS 
    表示・演奏（アプリの音声経路で実測）・ポーズ連動・キー入力を
    確認。統合の詳細と iOS 固有の知見（case 違いファイル生成の
    EEXIST、startAudio の player 前提）は docs/IOS-INTEGRATION.md。
-   残件: XDD/FFDD 表示サービスの画面反映（選択カーソル含む）。）
+   残件: XDD/FFDD 表示サービスの画面反映（選択カーソル含む）。
+   2026-11-18 に前進: ディスパッチャ候補 0xA73F とテキスト
+   イメージ（0xF3C8、25 行×120 バイト）のレイアウトを特定。
+   描画本体 0xA8A6/0xA90D のコード供給元が未確定で、そこが
+   本丸。詳細は docs/NEOMSC-CONTRACT.md の FFDD 節。）
 
 各段階は CLI の画面ダンプ／キー入力スクリプトで検証する
 （`docs/HOST-CLI.md` の仕組みを使う）。
