@@ -11,6 +11,7 @@
 #include <string.h>
 #include "hal.h"
 #include "vessel.h"
+#include "opna.h"
 #include "z80.h"
 
 #define STEP_CAP    4000000L
@@ -246,11 +247,14 @@ static unsigned char misc_port[256];
 static int opn_addr[2];
 static unsigned char opn_reg[2][256];
 static unsigned long opn_nwrite[256];   /* bank-0 write counts */
+static unsigned long opn_nwrite1[256];  /* bank-1 write counts */
 static int tb_flag = 0;                 /* Timer B status flag */
 
 static void opn_write(int bank, int addr, int v)
 {
     opn_reg[bank][addr] = (unsigned char)v;
+    opna_write(bank, addr, v);          /* sound rendering sink (ymfm) */
+    if (bank == 1) { opn_nwrite1[addr]++; return; }
     if (bank == 0) {
         opn_nwrite[addr]++;
         if (addr == 0x27 && (v & 0x08)) tb_flag = 0;    /* RST B */
@@ -499,6 +503,7 @@ static long tb_period(void)
 
 static void irq_advance(long cycles)
 {
+    opna_advance(cycles);               /* audio rendering follows the same clock */
     vrtc_left -= cycles;
     if (vrtc_left <= 0) { vrtc_left += VRTC_PERIOD; vrtc_due = 1; }
     if (opn_reg[0][0x27] & 0x02) {              /* Timer B enabled */
@@ -694,6 +699,40 @@ int vessel_disk_read(int ltrack, int sector, int count, unsigned addr)
                            ltrack, sector, count, addr, i);
     if (i > 0) vessel_notify_load(addr, (long)i * 256L);
     return i;
+}
+
+unsigned long vessel_opn_keyons(void)
+{
+    return opn_nwrite[0x28];
+}
+
+unsigned long vessel_opn_writes(void)
+{
+    unsigned long tot = 0;
+    int i;
+    for (i = 0; i < 256; i++) tot += opn_nwrite[i];
+    return tot;
+}
+
+unsigned long vessel_opn_writes1(void)
+{
+    unsigned long tot = 0;
+    int i;
+    for (i = 0; i < 256; i++) tot += opn_nwrite1[i];
+    return tot;
+}
+
+unsigned long vessel_opn_adpcmb_ctl(void)
+{
+    return opn_nwrite[0x10];    /* ADPCM-B control register writes */
+}
+
+unsigned long vessel_opn_rhythm_writes(void)
+{
+    unsigned long tot = 0;
+    int i;
+    for (i = 0; i < 0x30; i++) tot += opn_nwrite1[i];   /* ADPCM-A block */
+    return tot;
 }
 
 void vessel_notify_load(unsigned addr, long len)

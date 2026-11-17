@@ -1,0 +1,23 @@
+/* opna.h - OPNA (YM2608) sound rendering for the host build (ymfm).
+ *   The vessel's port model forwards every OPNA register write to
+ *   opna_write(); opna_advance() is driven by emulated CPU cycles and
+ *   renders the corresponding span of audio. The headless harness has
+ *   no speakers, so rendering happens only when the P8PWAV environment
+ *   variable names an output WAV file; otherwise both calls are
+ *   cheap no-ops.
+ */
+#ifndef OPNA_H
+#define OPNA_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void opna_write(int bank, int addr, int value);
+void opna_advance(long cpu_cycles);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

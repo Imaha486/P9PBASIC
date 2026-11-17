@@ -5,16 +5,29 @@
 #ifndef VESSEL_H
 #define VESSEL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void vessel_init(void);                            /* idempotent one-time setup */
 void vessel_exec(unsigned entry);                  /* run Z80 from entry until it RETs to a sentinel */
 long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de); /* call with preset registers */
 int  vessel_disk_read(int ltrack, int sector, int count, unsigned addr); /* FFDE service 0: raw sector read from P8P_DISK */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */
 void vessel_pump(void);                            /* advance emulated time + deliver due interrupts (call while BASIC runs) */
+unsigned long vessel_opn_keyons(void);             /* OPNA key on/off write count (diagnostics) */
+unsigned long vessel_opn_writes(void);             /* OPNA bank-0 write total (diagnostics) */
+unsigned long vessel_opn_writes1(void);            /* OPNA bank-1 write total (diagnostics) */
+unsigned long vessel_opn_adpcmb_ctl(void);         /* ADPCM-B control writes (diagnostics) */
+unsigned long vessel_opn_rhythm_writes(void);      /* ADPCM-A block writes (diagnostics) */
 
 /* The PC-88 port model, shared by the Z80 and by BASIC's own INP/OUT
  * (the host HAL delegates hal_inp/hal_outp to these). */
 int  vessel_port_in(int port);
 void vessel_port_out(int port, int value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
