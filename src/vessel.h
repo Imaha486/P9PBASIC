@@ -9,4 +9,9 @@ void vessel_init(void);                            /* idempotent one-time setup 
 void vessel_exec(unsigned entry);                  /* run Z80 from entry until it RETs to a sentinel */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */
 
+/* The PC-88 port model, shared by the Z80 and by BASIC's own INP/OUT
+ * (the host HAL delegates hal_inp/hal_outp to these). */
+int  vessel_port_in(int port);
+void vessel_port_out(int port, int value);
+
 #endif

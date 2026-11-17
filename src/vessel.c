@@ -270,7 +270,7 @@ static void note_port(unsigned char *map, const char *dir, int port, int v)
     }
 }
 
-static int vessel_port_in(int port)
+int vessel_port_in(int port)
 {
     if (port >= 0xFC) {
         subsys_pump();
@@ -289,7 +289,7 @@ static int vessel_port_in(int port)
     return 0xFF;
 }
 
-static void vessel_port_out(int port, int v)
+void vessel_port_out(int port, int v)
 {
     if (port >= 0xFC) {
         subsys_pump();

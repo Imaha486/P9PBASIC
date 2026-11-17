@@ -1,5 +1,6 @@
 /* halhost.c - host (Linux) HAL for testing the interpreter core */
 #include "basic.h"
+#include "vessel.h"
 #include <time.h>
 
 static unsigned short tv[25][80];
@@ -126,8 +127,12 @@ void hal_idle(void)
     } else idle_count = 0;
 }
 
-int hal_inp(unsigned port) { (void)port; return 0xFF; }  /* E0h-ECh: no key pressed */
-void hal_outp(unsigned port, int val) { (void)port; (void)val; }
+/* BASIC's INP/OUT go through the vessel's PC-88 port model, so the
+ * interpreter and the Z80 see the same machine (sound board probe,
+ * disk subsystem, ...). Ports the model does not know read as 0xFF,
+ * which is also the idle keyboard matrix. */
+int hal_inp(unsigned port) { return vessel_port_in((int)(port & 0xFF)); }
+void hal_outp(unsigned port, int val) { vessel_port_out((int)(port & 0xFF), val); }
 int hal_peek(unsigned seg, unsigned off) { (void)seg; return memory[off & 0xFFFF]; }
 void hal_poke(unsigned seg, unsigned off, int v) { (void)seg; memory[off & 0xFFFF] = (unsigned char)v; }
 unsigned hal_dataseg(void) { return 0x1000; }
