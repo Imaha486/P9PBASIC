@@ -30,6 +30,11 @@ void      p8_start(P8Engine *e);
 void      p8_stop(P8Engine *e);          /* blocks until stopped */
 int       p8_running(P8Engine *e);
 
+/* Freeze/resume the guest (the sequencer and the audio clock stop
+ * with it; on resume there is no catch-up burst). */
+void      p8_set_paused(P8Engine *e, int paused);
+int       p8_paused(P8Engine *e);
+
 /* Input: character / special keys (KC_* from hal.h) and the raw
  * keyboard matrix (16 bytes, as hal_keymatrix returns). */
 void      p8_push_key(P8Engine *e, int code);

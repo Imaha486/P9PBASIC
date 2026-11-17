@@ -313,6 +313,7 @@ int vessel_port_in(int port)
         }
     }
     note_port(in_seen, "IN", port, -1);
+    if (port <= 0x0E) return hal_keymatrix(port);   /* keyboard matrix rows */
     switch (port) {
     case 0x44: case 0xA8: return tb_flag ? 0x02 : 0x00;  /* OPNA status: never busy */
     case 0xA9: return 1;    /* Sound Board II present */

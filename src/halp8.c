@@ -67,6 +67,10 @@ void halp8_set_matrix(int idx, unsigned char v) { kmatrix[idx & 15] = v; }
 void halp8_request_stop(void) { stop_req = 1; }
 int  halp8_stop_requested(void) { return stop_req; }
 
+static volatile int paused_flag = 0;
+void halp8_set_paused(int paused) { paused_flag = paused; }
+int  halp8_paused(void) { return paused_flag; }
+
 const unsigned short *halp8_text_codes(void) { return &tv[0][0]; }
 const unsigned char  *halp8_text_attrs(void) { return &ta[0][0]; }
 const unsigned char  *halp8_gfx(int page) { return &gv[page & 1][0][0]; }
@@ -77,7 +81,11 @@ void halp8_cursor(int *x, int *y, int *visible)
     *x = hcur_x; *y = hcur_y; *visible = hcur_vis;
 }
 
-void hal_init(int f) { (void)f; }
+void hal_init(int f)
+{
+    (void)f;
+    memset(kmatrix, 0xFF, sizeof(kmatrix));   /* idle = nothing pressed */
+}
 void hal_term(void) { p8_bail(); }
 
 void hal_tput(int x, int y, unsigned short v, unsigned char a)
@@ -117,6 +125,8 @@ unsigned long hal_ticks(void) { return tick++; }
 void hal_beep(int on) { (void)on; }
 void hal_idle(void)
 {
+    if (stop_req) p8_bail();
+    while (paused_flag && !stop_req) usleep(10000);
     if (stop_req) p8_bail();
     tick++;
     /* When the guest is waiting for input there is nothing to
@@ -190,6 +200,8 @@ void hal_setdate(int y, int mo, int d) { (void)y; (void)mo; (void)d; }
 void hal_poll(void)
 {
     static int n = 0;
+    if (stop_req) p8_bail();
+    while (paused_flag && !stop_req) usleep(10000);
     if (stop_req) p8_bail();
     if (++n < 64) return;
     n = 0;

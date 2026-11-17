@@ -23,6 +23,8 @@ void halp8_push_key(int code);
 void halp8_set_matrix(int idx, unsigned char v);
 void halp8_request_stop(void);
 int  halp8_stop_requested(void);
+void halp8_set_paused(int paused);
+int  halp8_paused(void);
 
 #ifdef __cplusplus
 }

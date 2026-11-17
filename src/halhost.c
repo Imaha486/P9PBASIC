@@ -55,6 +55,7 @@ static void dump(void)
 void hal_init(int f)
 {
     (void)f;
+    memset(kmatrix, 0xFF, sizeof(kmatrix));   /* idle = nothing pressed */
     keys = getenv("P9PKEYS");
     if (!keys) keys = "";
     atexit(dump);

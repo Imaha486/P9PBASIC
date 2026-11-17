@@ -216,6 +216,26 @@ void p8_stop(P8Engine *e)
 
 int p8_running(P8Engine *e) { return e->running; }
 
+void p8_set_paused(P8Engine *e, int paused)
+{
+    static struct timespec pause_begin;
+    if (paused && !halp8_paused()) {
+        clock_gettime(CLOCK_MONOTONIC, &pause_begin);
+        halp8_set_paused(1);
+    } else if (!paused && halp8_paused()) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        /* shift the pacing origin past the pause, so the guest
+         * does not fast-forward to catch up with the wall clock */
+        e->t0.tv_sec += now.tv_sec - pause_begin.tv_sec;
+        e->t0.tv_nsec += now.tv_nsec - pause_begin.tv_nsec;
+        if (e->t0.tv_nsec >= 1000000000L) { e->t0.tv_nsec -= 1000000000L; e->t0.tv_sec++; }
+        if (e->t0.tv_nsec < 0) { e->t0.tv_nsec += 1000000000L; e->t0.tv_sec--; }
+        halp8_set_paused(0);
+    }
+}
+int  p8_paused(P8Engine *e) { (void)e; return halp8_paused(); }
+
 void p8_push_key(P8Engine *e, int code) { (void)e; halp8_push_key(code); }
 void p8_set_matrix(P8Engine *e, int idx, unsigned char v)
 {
