@@ -49,6 +49,18 @@ static void dump_ppm(P8Engine *e, const char *path)
     fclose(f);
 }
 
+/* momentary PC-88 matrix key press (300 ms), for games that poll
+ * INP() rows instead of reading the key queue */
+static unsigned char shadow_rows[16];
+static void matrix_press(P8Engine *e, int row, int bit)
+{
+    shadow_rows[row] &= (unsigned char)~(1u << bit);
+    p8_set_matrix(e, row, shadow_rows[row]);
+    usleep(300000);
+    shadow_rows[row] |= (unsigned char)(1u << bit);
+    p8_set_matrix(e, row, shadow_rows[row]);
+}
+
 static void wav_write(const char *path, const short *pcm, long frames)
 {
     FILE *f = fopen(path, "wb");
@@ -85,6 +97,7 @@ int main(int argc, char **argv)
     }
     secs = atoi(argv[2]);
     keys = argc > 3 ? argv[3] : "";
+    memset(shadow_rows, 0xFF, sizeof(shadow_rows));
     e = p8_create(argv[1]);
     if (!e) { fprintf(stderr, "create failed\n"); return 1; }
     if (p8_boot(e) != 0) { fprintf(stderr, "boot failed\n"); return 1; }
@@ -105,6 +118,10 @@ int main(int argc, char **argv)
         case 'l': p8_push_key(e, 0x1D); break;
         case 'R': p8_push_key(e, 0x1C); break;
         case 'w': sleep(1); break;
+        case 'D': matrix_press(e, 0xA, 1); break;   /* cursor down */
+        case 'U': matrix_press(e, 0x8, 1); break;   /* cursor up */
+        case 'S': matrix_press(e, 0x9, 6); break;   /* SPACE */
+        case 'E': matrix_press(e, 0x1, 7); break;   /* RETURN */
         default:
             if (c >= '1' && c <= '9') p8_push_key(e, KC_F1 + (c - '1'));
             else if (c == '0') p8_push_key(e, KC_F1 + 9);
