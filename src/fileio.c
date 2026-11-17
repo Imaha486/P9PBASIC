@@ -1,5 +1,6 @@
 /* fileio.c - file statements (DOS file functions only) */
 #include "basic.h"
+#include "vessel.h"
 #include <ctype.h>
 #ifdef __WATCOMC__
 #include <dos.h>
@@ -246,9 +247,10 @@ void stmt_bload(void)
     unsigned seg = def_seg;
     FILE *fp;
     int c;
+    int run_after = 0;
     eval_str(&a);
-    if (accept(',')) { if (peekc() != ',' && !at_stmt_end() && toupper(peekc()) != 'R') off = eval_long(); if (accept(',')) { if (toupper(peekc()) == 'R') txtptr++; } else if (toupper(peekc()) == 'R') txtptr++; /* PC-88 style: BLOAD "file",R */ }
-    else if (!at_stmt_end() && toupper(peekc()) == 'R') txtptr++;
+    if (accept(',')) { if (peekc() != ',' && !at_stmt_end() && toupper(peekc()) != 'R') off = eval_long(); if (accept(',')) { if (toupper(peekc()) == 'R') { txtptr++; run_after = 1; } } else if (toupper(peekc()) == 'R') { txtptr++; run_after = 1; } /* PC-88 style: BLOAD "file",R */ }
+    else if (!at_stmt_end() && toupper(peekc()) == 'R') { txtptr++; run_after = 1; }
     file_fname(a.u.s.p, a.u.s.len, fn, 0);
     fp = fopen(fn, "rb");
     if (!fp) berror(E_FILE_NF);
@@ -262,11 +264,14 @@ void stmt_bload(void)
         }
         for (i = 0; i < len; i++) { c = fgetc(fp); if (c == EOF) break; hal_poke(seg, (unsigned)(off + i), c); }
     } else {
-        if (off < 0) off = 0;
+        /* raw image: default to the machine area above CLEAR ,m */
+        if (off < 0) off = p8_mem_top ? (long)((p8_mem_top + 1) & 0xFFFF) : 0x8000L;
         i = 0;
         while (c != EOF) { hal_poke(seg, (unsigned)(off + i), c); i++; c = fgetc(fp); }
     }
     fclose(fp);
+    vessel_notify_load((unsigned)off, i);
+    if (run_after) { vessel_init(); vessel_exec((unsigned)off); }
 }
 
 long dos_diskfree(int drive)

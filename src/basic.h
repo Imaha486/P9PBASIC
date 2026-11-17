@@ -235,6 +235,7 @@ extern int out_col;
 /* misc */
 void list_program(u16 a, u16 b, FILE *fp);
 extern unsigned def_seg;
+extern unsigned p8_mem_top;   /* CLEAR ,m (0 = not set) */
 extern int trace_on;
 void stmt_key(void);
 void key_traps_check(void);

@@ -24,6 +24,7 @@ int exit_after_run = 0;
 unsigned def_seg = 0;
 int trace_on = 0;
 int ok_needed = 1;
+unsigned p8_mem_top = 0;   /* CLEAR ,m : top of BASIC memory (0 = never set) */
 
 #define PROG_MAX 0xFF00u
 static u8 *cur_lp;         /* current line header (program) */
@@ -1196,8 +1197,8 @@ static void stmt_renum(void)
 /* ---------------- misc statements ---------------- */
 static void stmt_clear(void)
 {
-    /* CLEAR [n[,m]] : arguments ignored */
-    if (!at_stmt_end()) { if (peekc() != ',') eval_long(); if (accept(',')) eval_long(); if (accept(',')) eval_long(); }
+    /* CLEAR [n[,m]] : only m (memory top) is recorded, for BLOAD's default address */
+    if (!at_stmt_end()) { if (peekc() != ',') eval_long(); if (accept(',')) p8_mem_top = (unsigned)(eval_long() & 0xFFFF); if (accept(',')) eval_long(); }
     var_clear_all();
     fn_clear();
     file_close_all();

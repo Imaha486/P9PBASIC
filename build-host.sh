@@ -8,7 +8,8 @@ set -e
 cd "$(dirname "$0")"
 mkdir -p build-host
 CC=${CC:-cc}
-$CC -O1 -o build-host/p8pbasic \
+$CC -O1 -Ithird_party/z80 -o build-host/p8pbasic \
   src/main.c src/exec.c src/eval.c src/var.c src/num.c src/token.c \
-  src/print.c src/screen.c src/graph.c src/fileio.c src/halhost.c -lm
+  src/print.c src/screen.c src/graph.c src/fileio.c src/halhost.c \
+  src/vessel.c third_party/z80/z80.c -lm
 ls -l build-host/p8pbasic
