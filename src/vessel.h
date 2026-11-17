@@ -10,6 +10,7 @@ void vessel_exec(unsigned entry);                  /* run Z80 from entry until i
 long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de); /* call with preset registers */
 int  vessel_disk_read(int ltrack, int sector, int count, unsigned addr); /* FFDE service 0: raw sector read from P8P_DISK */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */
+void vessel_pump(void);                            /* advance emulated time + deliver due interrupts (call while BASIC runs) */
 
 /* The PC-88 port model, shared by the Z80 and by BASIC's own INP/OUT
  * (the host HAL delegates hal_inp/hal_outp to these). */

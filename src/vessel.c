@@ -2,7 +2,8 @@
  *   Memory is the interpreter's 64KB guest memory (hal_peek/hal_poke, seg 0).
  *   PC-88 ROM entry points are trapped by address and emulated or skipped.
  *   I/O ports model the PC-88 disk subsystem (8255 at FCh-FFh, D88 image
- *   from P8P_DISK) plus a few sound board / CTC stubs.
+ *   from P8P_DISK), the OPNA register file with its Timer B, and the
+ *   IM 2 interrupt pair (VRTC + Timer B) that PMD's playback runs on.
  *   Trace output (stderr) is enabled by the P8P_TRACE_VESSEL environment variable.
  */
 #include <stdio.h>
@@ -236,8 +237,27 @@ static int prev_c = 0;          /* hostc as of the previous pump */
 static int latch = 0xFF;        /* last byte written by the host */
 static int latched = 0;
 static int sub_dac = 0;         /* subsystem DAC status */
-static int snd_addr = 0;
 static unsigned char misc_port[256];
+
+/* OPNA (YM2608) register file. Both PC-88 port pairs are tracked:
+ * 44h/45h + 46h/47h and A8h-A9h + AAh/ABh (bank 0 / bank 1).
+ * Bank 0 registers 26h (Timer B counter) and 27h (timer control)
+ * drive the interrupt model below. */
+static int opn_addr[2];
+static unsigned char opn_reg[2][256];
+static unsigned long opn_nwrite[256];   /* bank-0 write counts */
+static int tb_flag = 0;                 /* Timer B status flag */
+
+static void opn_write(int bank, int addr, int v)
+{
+    opn_reg[bank][addr] = (unsigned char)v;
+    if (bank == 0) {
+        opn_nwrite[addr]++;
+        if (addr == 0x27 && (v & 0x08)) tb_flag = 0;    /* RST B */
+        if (tracing() && (addr == 0x26 || addr == 0x27))
+            fprintf(stderr, "VESSEL OPN reg %02X <- %02X\n", addr, v);
+    }
+}
 
 /* advance the handshake on DAV / DAC edges since the previous call */
 static void subsys_pump(void)
@@ -283,6 +303,7 @@ int vessel_port_in(int port)
     }
     note_port(in_seen, "IN", port, -1);
     switch (port) {
+    case 0x44: case 0xA8: return tb_flag ? 0x02 : 0x00;  /* OPNA status: never busy */
     case 0xA9: return 1;    /* Sound Board II present */
     case 0x31: case 0x32: case 0x34: case 0x35: return misc_port[port];
     }
@@ -315,7 +336,10 @@ void vessel_port_out(int port, int v)
     }
     note_port(out_seen, "OUT", port, v);
     switch (port) {
-    case 0xA8: snd_addr = v; break;
+    case 0x44: case 0xA8: opn_addr[0] = v; break;
+    case 0x45: case 0xA9: opn_write(0, opn_addr[0], v); break;
+    case 0x46: case 0xAA: opn_addr[1] = v; break;
+    case 0x47: case 0xAB: opn_write(1, opn_addr[1], v); break;
     case 0x31: case 0x32: case 0x34: case 0x35: misc_port[port] = (unsigned char)v; break;
     }
 }
@@ -441,6 +465,79 @@ static int trap(void)
     return 0;
 }
 
+/* ================= interrupts (PMD's IM 2 pair) ================= */
+/* PMD88 (KAJA) runs on two interrupts, installed by its init (rtlset)
+ * into the Z80 IM 2 vector table at (I << 8): VRTC at +2 (fadeout and
+ * effects, ~60 Hz; the handler chains to BASIC's VRTC handler at
+ * 0xE808) and the OPNA interrupt at +8 (the sequencer main, clocked by
+ * Timer B: counter register 0x26, control 0x27). On hardware the host
+ * BASIC owns the I register and the table page; the vessel presets I
+ * to a free page and delivers both interrupts through z80_gen_int.
+ * Layout per the PMD88 v3.7 source (src2.txt L35-36, L111-223,
+ * L225-267, L476-523); MA2026 bundles PMD v3.3, so the harness
+ * verifies that the bundled binary registers the same slots. */
+#define IRQ_PAGE    0xE9
+#define VRTC_VEC    2
+#define OPN_VEC     8
+#define REST_CELL   0xE80A      /* planted RET: the at-rest mainline PC */
+#define VRTC_PERIOD 66667L      /* 4 MHz CPU / 60 Hz */
+#define PUMP_SLICE  16667L      /* emulated cycles per vessel_pump() */
+
+static int in_run = 0;
+static unsigned long last_cyc = 0;
+static long vrtc_left = VRTC_PERIOD;
+static long tb_left = 0;
+static int vrtc_due = 0, tb_due = 0;
+static int slot_vrtc_seen = 0, slot_opn_seen = 0;
+
+static long tb_period(void)
+{
+    /* Timer B period in 4 MHz CPU cycles: (256 - reg26) counts of
+     * 1152 OPNA clocks at 7.9872 MHz. */
+    return (long)(256 - opn_reg[0][0x26]) * 1152L * 4000L / 7987L;
+}
+
+static void irq_advance(long cycles)
+{
+    vrtc_left -= cycles;
+    if (vrtc_left <= 0) { vrtc_left += VRTC_PERIOD; vrtc_due = 1; }
+    if (opn_reg[0][0x27] & 0x02) {              /* Timer B enabled */
+        if (tb_left <= 0) tb_left = tb_period();
+        tb_left -= cycles;
+        if (tb_left <= 0) {
+            tb_left += tb_period();
+            tb_flag = 1;
+            if (opn_reg[0][0x27] & 0x20) tb_due = 1;    /* IRQ enable B */
+        }
+    }
+}
+
+/* Queue at most one interrupt with the CPU core (Timer B first). */
+static void irq_service(void)
+{
+    unsigned h;
+    if (cpu.int_pending) return;
+    if (tb_due) {
+        tb_due = 0;
+        h = rd16((IRQ_PAGE << 8) | OPN_VEC);
+        if (h >= 0x8000) {
+            if (!slot_opn_seen && tracing()) fprintf(stderr, "VESSEL OPN int handler %04X\n", h);
+            slot_opn_seen = 1;
+            z80_gen_int(&cpu, OPN_VEC);
+            return;
+        }
+    }
+    if (vrtc_due) {
+        vrtc_due = 0;
+        h = rd16((IRQ_PAGE << 8) | VRTC_VEC);
+        if (h >= 0x8000) {
+            if (!slot_vrtc_seen && tracing()) fprintf(stderr, "VESSEL VRTC int handler %04X\n", h);
+            slot_vrtc_seen = 1;
+            z80_gen_int(&cpu, VRTC_VEC);
+        }
+    }
+}
+
 void vessel_init(void)
 {
     if (inited) return;
@@ -451,6 +548,14 @@ void vessel_init(void)
     cpu.port_in = io_in;
     cpu.port_out = io_out;
     cpu.userdata = 0;
+    /* PMD's init reads the I register to find the IM 2 vector table;
+     * preset it (and IM 2) the way the host BASIC would. BASIC's VRTC
+     * handler at 0xE808 gets an EI;RET stub for the handler chain. */
+    cpu.i = IRQ_PAGE;
+    cpu.interrupt_mode = 2;
+    hal_poke(0, 0xE808, 0xFB);
+    hal_poke(0, 0xE809, 0xC9);
+    hal_poke(0, REST_CELL, 0xC9);
     /* The interpreter's evaluated-argument descriptor lives at (0xEC41);
      * point it at a scratch block the RST 8 trap fills in. */
     hal_poke(0, 0xEC41, 0x44);
@@ -460,17 +565,25 @@ void vessel_init(void)
     hal_poke(0, 0xEC46, 0);
 }
 
-static long run_loop(void)
+static long run_loop_body(void)
 {
     long n;
     int t;
     int steps = getenv("P8P_TRACE_STEPS") != 0;
+    last_cyc = cpu.cyc;
     for (n = 0; n < STEP_CAP; n++) {
         t = trap();
         if (t < 0) return n;
         if (t > 0) continue;
         if (steps) fprintf(stderr, "STEP %04X %02X\n", (unsigned)cpu.pc, hal_peek(0, cpu.pc));
         z80_step(&cpu);
+        {   /* emulated time follows the CPU's own cycle counter */
+            unsigned long now = cpu.cyc;
+            long dc = (long)(now - last_cyc);
+            last_cyc = now;
+            if (dc > 0) irq_advance(dc);
+        }
+        irq_service();
         if (cpu.halted) {
             fprintf(stderr, "VESSEL HALT at %04X, stopped\n", (unsigned)cpu.pc);
             return n;
@@ -478,6 +591,56 @@ static long run_loop(void)
     }
     fprintf(stderr, "VESSEL step cap reached at %04X, stopped\n", (unsigned)cpu.pc);
     return -1;
+}
+
+static long run_loop(void)
+{
+    long r;
+    in_run = 1;
+    r = run_loop_body();
+    in_run = 0;
+    return r;
+}
+
+/* Advance emulated time while the native interpreter runs (BASIC is
+ * the mainline; the Z80 only runs in bursts), and execute any
+ * interrupt handlers that come due, on a sentinel stack like a call.
+ * Called once per statement from exec_loop. */
+void vessel_pump(void)
+{
+    int k;
+    static unsigned long pump_count = 0;
+    if (!inited || in_run) return;
+    /* At rest the machine belongs to the host mainline, which runs
+     * with interrupts enabled (the ROM does); a driver call that
+     * returns with DI must not mute the machine for good. */
+    cpu.iff1 = 1;
+    cpu.iff2 = 1;
+    if (tracing() && ++pump_count % 60000 == 0) {
+        unsigned long tot = 0;
+        int i;
+        for (i = 0; i < 256; i++) tot += opn_nwrite[i];
+        fprintf(stderr, "VESSEL pump %lu: OPN writes total %lu, keyon/off %lu, timerB %lu, iff1 %d pend %d\n",
+                pump_count, tot, opn_nwrite[0x28], opn_nwrite[0x26],
+                (int)cpu.iff1, (int)cpu.int_pending);
+    }
+    irq_advance(PUMP_SLICE);
+    /* Step the CPU whenever an interrupt is due OR already pending:
+     * a vector queued at the tail of a driver call is only accepted
+     * by a later step, so refusing to step while one is pending
+     * would wedge playback for good. */
+    for (k = 0; k < 2 && (vrtc_due || tb_due || cpu.int_pending); k++) {
+        cpu.halted = 0;
+        cpu.sp = (uint16_t)(STACK_INIT - 2);
+        hal_poke(0, cpu.sp, SENTINEL & 0xFF);
+        hal_poke(0, cpu.sp + 1, SENTINEL >> 8);
+        cpu.pc = (uint16_t)REST_CELL;   /* steppable rest PC: a pending
+                                         * interrupt is accepted before
+                                         * its RET reaches the sentinel */
+        irq_service();
+        run_loop();
+        if (!cpu.int_pending && !vrtc_due && !tb_due) break;
+    }
 }
 
 void vessel_exec(unsigned entry)
