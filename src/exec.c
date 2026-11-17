@@ -1384,11 +1384,18 @@ static void stmt_ext(int which)
         ext_put(p, 0x00);
         vessel_call(0xA5DF, 0, EXT_STREAM + 3, EXT_STREAM, 0);
     } else if (which == 1 && nnum >= 1) {
-        /* XDE: service 0 is the raw sector read (vessel_disk_read);
-         * services 1-3 are traced only for now. */
+        /* XDE services with statement-level equivalents in the
+         * vessel: 0 = raw sector read into guest memory, 1 = the
+         * ADPCM block bulk load into the SB2 sample RAM. Service 2
+         * (DRAM -> guest copy) is unreachable in MA2026's shipped
+         * configuration (MENU.ALP forces RD=1, so the per-song
+         * loads always take the service 0 path), and service 3 is
+         * the staff-roll text service; both stay trace-only. */
         if (nums[0] == 0 && nnum >= 6)
             vessel_disk_read((int)nums[2], (int)nums[3], (int)nums[4],
                              (unsigned)(nums[5] & 0xFFFF));
+        else if (nums[0] == 1 && nnum >= 4)
+            vessel_dram_load((int)nums[2], (int)nums[3]);
     }
 }
 

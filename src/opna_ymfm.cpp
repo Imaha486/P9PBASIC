@@ -24,19 +24,31 @@ const uint32_t CHIP_CLOCK = 7987200;    /* OPNA master clock on SB2 */
 const int HOST_RATE = 44100;
 const long CPU_CLOCK = 4000000;         /* vessel CPU clock */
 
+unsigned long g_ext_reads_b = 0, g_ext_writes_b = 0;   /* diagnostics */
+unsigned long g_ext_reads_a = 0;
+
 struct Iface : ymfm::ymfm_interface {
     std::vector<uint8_t> adpcm_b_ram;
-    Iface() : adpcm_b_ram(256 * 1024, 0) {}
+    std::vector<uint8_t> adpcm_a_ram;   /* SB2's writable ADPCM-A memory */
+    Iface() : adpcm_b_ram(256 * 1024, 0), adpcm_a_ram(1024 * 1024, 0) {}
     uint8_t ymfm_external_read(ymfm::access_class type, uint32_t offset) override
     {
-        if (type == ymfm::ACCESS_ADPCM_B && offset < adpcm_b_ram.size())
+        if (type == ymfm::ACCESS_ADPCM_B && offset < adpcm_b_ram.size()) {
+            g_ext_reads_b++;
             return adpcm_b_ram[offset];
+        }
+        if (type == ymfm::ACCESS_ADPCM_A && offset < adpcm_a_ram.size()) {
+            g_ext_reads_a++;
+            return adpcm_a_ram[offset];
+        }
         return 0;
     }
     void ymfm_external_write(ymfm::access_class type, uint32_t offset, uint8_t data) override
     {
-        if (type == ymfm::ACCESS_ADPCM_B && offset < adpcm_b_ram.size())
+        if (type == ymfm::ACCESS_ADPCM_B && offset < adpcm_b_ram.size()) {
+            g_ext_writes_b++;
             adpcm_b_ram[offset] = data;
+        }
     }
 };
 
@@ -142,11 +154,11 @@ void push_frame(void)
         int p = outbuf[outfill * 2]; if (p < 0) p = -p;
         if (p > sec_peak) sec_peak = p;
         if ((total_frames + 1) % (HOST_RATE * 10) == 0) {
-            fprintf(stderr, "AUDIO %u s: peak %d, keyons %lu, writes %lu, bank1 %lu, adpcmb %lu, rhythm %lu\n",
+            fprintf(stderr, "AUDIO %u s: peak %d, keyons %lu, ssg %lu, pcma %lu, fm %lu, extA r %lu\n",
                     (total_frames + 1) / HOST_RATE, sec_peak,
-                    vessel_opn_keyons(), vessel_opn_writes(),
-                    vessel_opn_writes1(), vessel_opn_adpcmb_ctl(),
-                    vessel_opn_rhythm_writes());
+                    vessel_opn_keyons(),
+                    vessel_opn_class(0x00, 0x0F), vessel_opn_class(0x10, 0x1F),
+                    vessel_opn_class(0x20, 0xFF), g_ext_reads_a);
             sec_peak = 0;
         }
     }
@@ -156,6 +168,12 @@ void push_frame(void)
 }
 
 } // namespace
+
+extern "C" void opna_adpcm_a_write(unsigned long addr, int value)
+{
+    if (addr < iface.adpcm_a_ram.size())
+        iface.adpcm_a_ram[(size_t)addr] = (uint8_t)value;
+}
 
 extern "C" void opna_write(int bank, int addr, int value)
 {

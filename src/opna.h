@@ -15,6 +15,9 @@ extern "C" {
 
 void opna_write(int bank, int addr, int value);
 void opna_advance(long cpu_cycles);
+/* Write one byte into the OPNA's ADPCM-A external memory (the Sound
+ * Board II's writable sample RAM that FFDE service 1 loads into). */
+void opna_adpcm_a_write(unsigned long addr, int value);
 
 #ifdef __cplusplus
 }

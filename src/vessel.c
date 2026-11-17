@@ -681,6 +681,51 @@ long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned 
     return run_loop();
 }
 
+/* Call an entry whose return sequence pops one extra word into HL
+ * before its RET (the Disk BASIC statement-dispatch stack shape:
+ * the caller pushes the token-stream pointer, the handler's tail
+ * POP HL / RET consumes it). `pushed` is that word. */
+long vessel_call_pushed(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de, unsigned pushed)
+{
+    vessel_init();
+    cpu.halted = 0;
+    cpu.sp = (uint16_t)(STACK_INIT - 4);
+    hal_poke(0, cpu.sp, pushed & 0xFF);
+    hal_poke(0, cpu.sp + 1, (pushed >> 8) & 0xFF);
+    hal_poke(0, cpu.sp + 2, SENTINEL & 0xFF);
+    hal_poke(0, cpu.sp + 3, SENTINEL >> 8);
+    cpu.a = (uint8_t)a;
+    cpu.h = (uint8_t)(hl >> 8); cpu.l = (uint8_t)hl;
+    cpu.b = (uint8_t)(bc >> 8); cpu.c = (uint8_t)bc;
+    cpu.d = (uint8_t)(de >> 8); cpu.e = (uint8_t)de;
+    cpu.pc = (uint16_t)(entry & 0xFFFF);
+    if (tracing()) fprintf(stderr, "VESSEL callp %04X A=%02X HL=%04X BC=%04X DE=%04X pushed=%04X\n",
+                               entry & 0xFFFF, a & 0xFF, hl & 0xFFFF, bc & 0xFFFF, de & 0xFFFF, pushed & 0xFFFF);
+    return run_loop();
+}
+
+/* FFDE service 1 equivalent: bulk-load `tracks` logical tracks
+ * starting at logical track `ltrack` from the P8P_DISK image into
+ * the OPNA's ADPCM-A sample RAM (the Sound Board II DRAM that
+ * PMD's PCM driver plays from), starting at DRAM offset 0.
+ * Returns the number of sectors loaded. */
+int vessel_dram_load(int ltrack, int tracks)
+{
+    unsigned char buf[256];
+    int n = 0, t, r, b;
+    unsigned long dst = 0;
+    for (t = ltrack; t < ltrack + tracks; t++) {
+        for (r = 1; r <= 16; r++) {
+            if (!d88_read_sector(t, r, buf)) return n;
+            for (b = 0; b < 256; b++) opna_adpcm_a_write(dst++, buf[b]);
+            n++;
+        }
+    }
+    if (tracing()) fprintf(stderr, "VESSEL dram_load ltrack %d tracks %d (%d sectors)\n",
+                           ltrack, tracks, n);
+    return n;
+}
+
 /* FFDE service 0 equivalent: read count 256-byte sectors starting at
  * (logical track, sector) from the P8P_DISK image into guest memory.
  * Logical track = cylinder * 2 + head, sector = 1..16 (D88 order).
@@ -725,6 +770,14 @@ unsigned long vessel_opn_writes1(void)
 unsigned long vessel_opn_adpcmb_ctl(void)
 {
     return opn_nwrite[0x10];    /* ADPCM-B control register writes */
+}
+
+unsigned long vessel_opn_class(int lo, int hi)
+{
+    unsigned long tot = 0;
+    int i;
+    for (i = lo; i <= hi && i < 256; i++) tot += opn_nwrite[i];
+    return tot;
 }
 
 unsigned long vessel_opn_rhythm_writes(void)
