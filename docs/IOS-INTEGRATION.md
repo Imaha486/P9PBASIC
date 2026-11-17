@@ -88,3 +88,25 @@ int       p8_audio_read(P8Engine *e, short *out, int frames);
 2. アプリ: シミュレータで MA2026 が起動し、曲一覧が出て
    演奏音が鳴ること（スクリーンショット＋音声キャプチャ）。
 3. 実機/TestFlight はユーザーの判断で別途。
+
+## 実装結果（2026-11-18、検証 1・2 完了）
+
+- アプリ側は `ios/P8Bridge.{h,mm}`（P8Session）が engine.h を
+  包み、tick・入力（updateScan）・ポーズ・停止を既存の
+  PlayerController に接続。CMake は `p8pbasic` 静的ライブラリを
+  追加（要 `enable_language(C)`——プロジェクトが CXX のみ宣言の
+  ため、C ソースは黙ってリンクから落ちる）。
+- iOS 固有の知見:
+  - 実体化ファイル名: コンテナ FS は case を畳むが、既存ファイルと
+    case だけが違う名前の新規作成は EEXIST で失敗する。拡張子付き
+    トークンプログラム（MENU.ALP）は `MENU_ALP.BAS` として実体化し、
+    拡張子なしの別プログラム（menu→menu.BAS）と衝突させない。
+  - `-[PlayerController startAudio]` は `player->ps.sample_rate`
+    を無条件参照する。P8 モード（player==nil）では 44100 を使う
+    ガードが必要（無いと起動即クラッシュ）。
+- シミュレータ実測（専用デバイス P8Test、Debug ビルド）:
+  起動 20 秒で曲リスト 34 曲が色・漢字つきで表示。音声プローブで
+  アプリ経由の PCM 13.4 秒を確認（無音の起動〜読込後に対象曲が
+  ピーク 14k 級で再生、ポーズ中はフレームカウンタが完全停止し
+  再開時にバーストしない）。入力はエンジン単体でマトリクス
+  SPACE→次曲送りを対照実験つきで確認。

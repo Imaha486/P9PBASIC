@@ -141,6 +141,13 @@ P8PBASIC は PC-88 インタプリタとして機能させ、器ごと RetroDOS 
    固定 ROM レイアウトの供給は不要だった。固定リズム ROM
    （暫定 WAV 6 点から組む）は器の汎用機能として分離点だけ残す。）
 6. **iOS 統合**: RetroDOS Player に器ごと組み込む。
+   （完了 2026-11-18: 埋め込みエンジン `src/engine.{c,h}` が
+   D88 を実体化して起動し、RetroDOS Player（PC98PLAYER-iOS）に
+   `Engine=P8` の INI で接続。シミュレータで MA2026 の曲リスト
+   表示・演奏（アプリの音声経路で実測）・ポーズ連動・キー入力を
+   確認。統合の詳細と iOS 固有の知見（case 違いファイル生成の
+   EEXIST、startAudio の player 前提）は docs/IOS-INTEGRATION.md。
+   残件: XDD/FFDD 表示サービスの画面反映（選択カーソル含む）。）
 
 各段階は CLI の画面ダンプ／キー入力スクリプトで検証する
 （`docs/HOST-CLI.md` の仕組みを使う）。
