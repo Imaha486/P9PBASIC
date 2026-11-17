@@ -247,7 +247,7 @@ void stmt_bload(void)
     FILE *fp;
     int c;
     eval_str(&a);
-    if (accept(',')) { if (peekc() != ',' && !at_stmt_end() && toupper(peekc()) != 'R') off = eval_long(); if (accept(',')) { if (toupper(peekc()) == 'R') txtptr++; } }
+    if (accept(',')) { if (peekc() != ',' && !at_stmt_end() && toupper(peekc()) != 'R') off = eval_long(); if (accept(',')) { if (toupper(peekc()) == 'R') txtptr++; } else if (toupper(peekc()) == 'R') txtptr++; /* PC-88 style: BLOAD "file",R */ }
     else if (!at_stmt_end() && toupper(peekc()) == 'R') txtptr++;
     file_fname(a.u.s.p, a.u.s.len, fn, 0);
     fp = fopen(fn, "rb");

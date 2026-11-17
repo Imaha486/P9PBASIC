@@ -1307,6 +1307,46 @@ static void stmt_out(void)
     hal_outp((unsigned)p, v & 0xFF);
 }
 
+/* XDD / XDE / XDF: stubs for PC-88 Z80-driver extension statements.
+ * Arguments are evaluated (for validation) and discarded.  XDF takes a bare
+ * command name (letters, stored as plain characters by the tokenizer) before
+ * the list.  Set P8P_TRACE_EXT to log each call to stderr. */
+static void stmt_ext(int which)
+{
+    static const char *nm[3] = { "XDD", "XDE", "XDF" };
+    char cmd[16];
+    int n = 0, args = 1;
+    int tr = getenv("P8P_TRACE_EXT") != 0;
+    cmd[0] = 0;
+    if (which == 2) {
+        while (*txtptr == ' ') txtptr++;
+        while (isalpha(*txtptr)) {
+            if (n < (int)sizeof(cmd) - 1) cmd[n++] = (char)toupper(*txtptr);
+            txtptr++;
+        }
+        cmd[n] = 0;
+        if (n) args = accept(',');
+    }
+    if (tr) {
+        fprintf(stderr, "%s", nm[which]);
+        if (which == 2) fprintf(stderr, " %s", cmd);
+    }
+    while (args) {
+        VAL v;
+        if (at_stmt_end()) break;
+        eval(&v);
+        if (tr) {
+            if (v.type == T_STR)
+                fprintf(stderr, " \"%.*s\"", (int)v.u.s.len, v.u.s.p ? v.u.s.p : "");
+            else
+                fprintf(stderr, " %g", val_to_dbl(&v));
+        }
+        if (accept(',') || accept(';')) continue;
+        break;
+    }
+    if (tr) fputc('\n', stderr);
+}
+
 static void stmt_wait(void)
 {
     long p; int a, x = 0;
@@ -1611,6 +1651,9 @@ static void exec_stmt(void)
     case T_POKE: stmt_poke(); break;
     case T_CONT: stmt_cont(); return;
     case T_OUT: stmt_out(); break;
+    case T_XDD: stmt_ext(0); break;
+    case T_XDE: stmt_ext(1); break;
+    case T_XDF: stmt_ext(2); break;
     case T_CLS: stmt_cls(); break;
     case T_WIDTH: stmt_width(); break;
     case T_ELSE: while (*txtptr) txtptr = skip_token(txtptr); return;
