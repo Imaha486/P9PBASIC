@@ -367,6 +367,25 @@ static uint8_t mem_read(void *ud, uint16_t addr)
 static void mem_write(void *ud, uint16_t addr, uint8_t v)
 {
     (void)ud;
+    /* P8P_WATCH=lo-hi (hex): log Z80 writes in range with the
+     * writer's pc, capped, for display-path investigation. */
+    static int watch_lo = -1, watch_hi = -1, watch_left = 4000;
+    if (watch_lo < 0) {
+        const char *w = getenv("P8P_WATCH");
+        watch_lo = 0; watch_hi = -1;
+        if (w) {
+            unsigned lo, hi;
+            if (sscanf(w, "%x-%x", &lo, &hi) == 2) {
+                watch_lo = (int)lo; watch_hi = (int)hi;
+            }
+        }
+    }
+    if (watch_hi >= 0 && (int)addr >= watch_lo && (int)addr <= watch_hi
+        && watch_left > 0) {
+        watch_left--;
+        fprintf(stderr, "ZW %04X <- %02X pc=%04X\n", addr, v,
+                (unsigned)cpu.pc);
+    }
     hal_poke(0, addr, v);
 }
 

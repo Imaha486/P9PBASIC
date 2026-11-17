@@ -122,6 +122,7 @@ int main(int argc, char **argv)
         case 'U': matrix_press(e, 0x8, 1); break;   /* cursor up */
         case 'S': matrix_press(e, 0x9, 6); break;   /* SPACE */
         case 'E': matrix_press(e, 0x1, 7); break;   /* RETURN */
+        case 'X': matrix_press(e, 0x9, 7); break;   /* ESC */
         default:
             if (c >= '1' && c <= '9') p8_push_key(e, KC_F1 + (c - '1'));
             else if (c == '0') p8_push_key(e, KC_F1 + 9);
