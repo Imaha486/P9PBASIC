@@ -19,10 +19,18 @@
  * guest code banks that window to the VRAM planes / ALU during draws,
  * which would redirect stack pushes and pops (and the sentinel) into
  * VRAM. The genuine interpreter's stack is in its own RAM for the same
- * reason. 0xBF00 sits between PMD (0xAA00+) and the window, clear of
- * the song/DB load areas. (Found 2026-11-18: with the stack at 0xF000,
- * XDD 8's decompressor returned through VRAM bytes and slid away.) */
-#define STACK_INIT  0xBF00u
+ * reason. (Found 2026-11-18: with the stack at 0xF000, XDD 8's
+ * decompressor returned through VRAM bytes and slid away.)
+ * The stack therefore lives at 0x98F0: below the window, in the gap
+ * the programs themselves reserve — CLEAR ,&H97FF caps BASIC at
+ * 0x97FF and NEOMSC loads at 0x9900, leaving 0x9800-0x98FF unused.
+ * NOT inside a driver image: an earlier placement at 0xBF00 sat
+ * inside PMD's loaded span (0xAA00-0xC9FF, 32 sectors), and stack
+ * writes there silently corrupted the driver — playback rendered
+ * as digital silence in the engine while code inspection showed
+ * nothing wrong (found 2026-11-18 by bisecting the embed build
+ * against the pre-banking tree). */
+#define STACK_INIT  0x98F0u
 #define SENTINEL    0xFFFFu
 #define PMD_START   0xAA00u
 #define PMD_END     0xAFFFu
@@ -871,6 +879,17 @@ void vessel_pump(void)
      * returns with DI must not mute the machine for good. */
     cpu.iff1 = 1;
     cpu.iff2 = 1;
+    /* At rest the C000-FFFF window likewise shows main RAM again:
+     * the interpreter's own work areas live there, so the genuine
+     * machine is never left with a VRAM plane selected between
+     * statements. Driver exits do not guarantee it — NEOMSC's CG
+     * decompressor, for one, leaves the G plane selected on its
+     * normal (0x00-terminated) exit; its OUT (0x5F) sits only on
+     * the page-exhaustion path. Without this, PMD's sequencer reads
+     * its song data at 0xCA00 through the stale plane and playback
+     * goes silent (found 2026-11-18 in the engine build, where the
+     * XDD draws actually execute). */
+    mem_bank = 3;
     if (tracing() && ++pump_count % 60000 == 0) {
         unsigned long tot = 0;
         int i;
