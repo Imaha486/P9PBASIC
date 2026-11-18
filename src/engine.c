@@ -261,7 +261,9 @@ void p8_set_matrix(P8Engine *e, int idx, unsigned char v)
 
 void p8_frame(P8Engine *e, unsigned char *rgba)
 {
-    const unsigned char *g = halp8_gfx(halp8_gfx_display_page());
+    static const unsigned char blank_gfx[400 * 640];
+    const unsigned char *g = halp8_gfx_visible()
+        ? halp8_gfx(halp8_gfx_display_page()) : blank_gfx;
     int x, y;
     (void)e;
     for (y = 0; y < 400; y++) {
@@ -277,8 +279,18 @@ void p8_frame(P8Engine *e, unsigned char *rgba)
     }
 }
 
-const unsigned short *p8_text_codes(P8Engine *e) { (void)e; return halp8_text_codes(); }
-const unsigned char  *p8_text_attrs(P8Engine *e) { (void)e; return halp8_text_attrs(); }
+const unsigned short *p8_text_codes(P8Engine *e)
+{
+    static const unsigned short blank_codes[25 * 80];
+    (void)e;
+    return halp8_text_visible() ? halp8_text_codes() : blank_codes;
+}
+const unsigned char  *p8_text_attrs(P8Engine *e)
+{
+    static const unsigned char blank_attrs[25 * 80];
+    (void)e;
+    return halp8_text_visible() ? halp8_text_attrs() : blank_attrs;
+}
 void p8_cursor(P8Engine *e, int *x, int *y, int *visible)
 {
     (void)e;

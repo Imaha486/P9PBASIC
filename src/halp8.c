@@ -145,7 +145,11 @@ unsigned hal_dataseg(void) { return 0x1000; }
 unsigned long hal_varptr(void *p) { return (unsigned long)((size_t)p & 0xFFFF) | 0x10000000UL; }
 void hal_call(unsigned seg, unsigned off) { (void)seg; (void)off; }
 
-void hal_gon(int on) { (void)on; }
+static int gon_flag = 1, ton_flag = 1;
+void hal_gon(int on) { gon_flag = on; }
+void hal_ton(int on) { ton_flag = on; }
+int halp8_gfx_visible(void) { return gon_flag; }
+int halp8_text_visible(void) { return ton_flag; }
 void hal_gpage(int a, int d) { ap = a; dp = d; }
 void hal_gpset(int x, int y, int c) { if (x >= 0 && x < 640 && y >= 0 && y < 400) gv[ap][y][x] = (unsigned char)c; }
 int hal_gpoint(int x, int y) { if (x >= 0 && x < 640 && y >= 0 && y < 400) return gv[ap][y][x]; return -1; }

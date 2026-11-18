@@ -14,6 +14,8 @@ const unsigned short *halp8_text_codes(void);
 const unsigned char  *halp8_text_attrs(void);
 const unsigned char  *halp8_gfx(int page);
 int  halp8_gfx_display_page(void);
+int  halp8_gfx_visible(void);
+int  halp8_text_visible(void);
 int  halp8_width40(void);
 void halp8_palette(int idx, int *r, int *g, int *b);   /* 0..255 */
 void halp8_cursor(int *x, int *y, int *visible);

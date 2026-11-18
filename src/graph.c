@@ -70,6 +70,7 @@ void g_init(void)
     hal_gpage(0, 0);
     hal_gclear(0);
     hal_gon(1);
+    hal_ton(1);
     g_on = 1;
 }
 
@@ -127,7 +128,16 @@ void stmt_screen(void)
     /* display page is a bit mask: bit0 = page 0, bit1 = page 1 (0 = none) */
     g_apage = ap; g_dpage = dp;
     hal_gpage(ap, (dp & 1) ? 0 : (dp & 2) ? 1 : 0);
-    if (sw >= 0) g_on = (sw == 0);
+    if (sw >= 0) {
+        /* PC-88 SCREEN display switch: 0 = graphics only,
+         * 1 = text only, 2 = text + graphics overlaid.
+         * (P9PBASIC's PC-98 rule, graphics on iff sw == 0, left
+         * the text plane permanently visible, so MA2026's
+         * attract mode showed the song list that the real
+         * machine hides until *SELECT.) */
+        g_on = (sw != 1);
+        hal_ton(sw != 0);
+    }
     hal_gon(g_on && dp != 0);
 }
 

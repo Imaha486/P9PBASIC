@@ -50,6 +50,7 @@ void hal_call(unsigned seg, unsigned off);
 
 /* ---- graphics (640x400, 4 planes) ---- */
 void hal_gon(int on);
+void hal_ton(int on);
 void hal_gpage(int active, int display);
 void hal_gpset(int x, int y, int c);
 int  hal_gpoint(int x, int y);
