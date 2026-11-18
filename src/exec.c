@@ -1335,11 +1335,46 @@ static unsigned ext_put_num(unsigned p, long v)
     return ext_put(p, (int)(u >> 8));
 }
 
+/* Build a synthesized token stream for an extension statement:
+ * [FF][sub][space] arg0 [, arg1] ... [00]. Numbers are re-encoded as
+ * token literals; a string argument becomes a quoted literal. The
+ * handlers parse their arguments out of the stream (via the RST 8
+ * svc 0x2C trap), exactly as on hardware. Returns the address of the
+ * first argument byte (what HL points at on handler entry). */
+static unsigned ext_build_stream(int sub, const long *nums,
+                                 const int *arg_is_str,
+                                 const char (*arg_str)[128],
+                                 const int *arg_slen, int narg)
+{
+    unsigned p = EXT_STREAM;
+    int i;
+    p = ext_put(p, 0xFF);
+    p = ext_put(p, sub);
+    p = ext_put(p, 0x20);
+    for (i = 0; i < narg; i++) {
+        if (i) p = ext_put(p, 0x2C);
+        if (arg_is_str[i]) {
+            int j;
+            p = ext_put(p, 0x22);
+            for (j = 0; j < arg_slen[i]; j++)
+                p = ext_put(p, (unsigned char)arg_str[i][j]);
+            p = ext_put(p, 0x22);
+        } else {
+            p = ext_put_num(p, nums[i]);
+        }
+    }
+    ext_put(p, 0x00);
+    return EXT_STREAM + 3;
+}
+
 static void stmt_ext(int which)
 {
     static const char *nm[3] = { "XDD", "XDE", "XDF" };
     char cmd[16];
     long nums[16];
+    int arg_is_str[16];
+    static char arg_str[16][128];
+    int arg_slen[16];
     int nnum = 0;
     int n = 0, args = 1;
     int tr = getenv("P8P_TRACE_EXT") != 0;
@@ -1361,7 +1396,22 @@ static void stmt_ext(int which)
         VAL v;
         if (at_stmt_end()) break;
         eval(&v);
-        if (v.type != T_STR && nnum < 16) nums[nnum++] = (long)val_to_dbl(&v);
+        if (nnum < 16) {
+            if (v.type == T_STR) {
+                int L = (int)v.u.s.len;
+                if (L > 127) L = 127;
+                arg_is_str[nnum] = 1;
+                arg_slen[nnum] = L;
+                if (L > 0 && v.u.s.p) memcpy(arg_str[nnum], v.u.s.p, (size_t)L);
+                arg_str[nnum][L] = 0;
+                nums[nnum] = 0;
+            } else {
+                arg_is_str[nnum] = 0;
+                arg_slen[nnum] = 0;
+                nums[nnum] = (long)val_to_dbl(&v);
+            }
+            nnum++;
+        }
         if (tr) {
             if (v.type == T_STR)
                 fprintf(stderr, " \"%.*s\"", (int)v.u.s.len, v.u.s.p ? v.u.s.p : "");
@@ -1373,8 +1423,19 @@ static void stmt_ext(int which)
     }
     if (tr) fputc('\n', stderr);
 
-    if (which == 2 && cmd[0] && hal_peek(0, 0xA5DF) == 0x7E) {
-        /* XDF: relay to NEOMSC's FFDF handler (HL = command letter). */
+    if (which == 0 && nnum >= 1 && hal_peek(0, 0x9E5C) == 0xCD) {
+        /* XDD: relay to NEOMSC's FFDD handler (the EEA1 vector's
+         * target, 0x9E5C; BC = the vector address, HL = the first
+         * argument token, A = that token's byte — the convention the
+         * genuine interpreter uses, verified against QUASI88). */
+        unsigned hl = ext_build_stream(0xDD, nums, arg_is_str,
+                                       arg_str, arg_slen, nnum);
+        vessel_prime_arg(nums[0]);
+        vessel_call(0x9E5C, (unsigned)hal_peek(0, hl), hl, 0xEEA1, 0);
+    } else if (which == 2 && cmd[0] && hal_peek(0, 0xA6DB) == 0x7E) {
+        /* XDF: relay to NEOMSC's FFDF handler (HL = command letter).
+         * The handler sits at 0xA6DB with NEOMSC loaded at its BSAVE
+         * header address 0x9900 (it was 0xA5DF in the old layout). */
         unsigned p = EXT_STREAM, i;
         p = ext_put(p, 0xFF); p = ext_put(p, 0xDF); p = ext_put(p, 0x20);
         for (i = 0; cmd[i]; i++) p = ext_put(p, (unsigned char)cmd[i]);
@@ -1383,7 +1444,7 @@ static void stmt_ext(int which)
             p = ext_put_num(p, nums[n]);
         }
         ext_put(p, 0x00);
-        vessel_call(0xA5DF, 0, EXT_STREAM + 3, EXT_STREAM, 0);
+        vessel_call(0xA6DB, 0, EXT_STREAM + 3, EXT_STREAM, 0);
     } else if (which == 1 && nnum >= 1) {
         /* XDE services with statement-level equivalents in the
          * vessel: 0 = raw sector read into guest memory, 1 = the
@@ -1397,6 +1458,15 @@ static void stmt_ext(int which)
                              (unsigned)(nums[5] & 0xFFFF));
         else if (nums[0] == 1 && nnum >= 4)
             vessel_dram_load((int)nums[2], (int)nums[3]);
+        else if (hal_peek(0, 0x994D) == 0xCD) {
+            /* Other XDE services (2 = DRAM copy, 3 = staff roll):
+             * relay to NEOMSC's FFDE handler (the EEA4 vector's
+             * target, 0x994D; same entry convention as XDD). */
+            unsigned hl = ext_build_stream(0xDE, nums, arg_is_str,
+                                           arg_str, arg_slen, nnum);
+            vessel_prime_arg(nums[0]);
+            vessel_call(0x994D, (unsigned)hal_peek(0, hl), hl, 0xEEA4, 0);
+        }
     }
 }
 

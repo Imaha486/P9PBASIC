@@ -15,7 +15,14 @@
 #include "z80.h"
 
 #define STEP_CAP    4000000L
-#define STACK_INIT  0xF000u
+/* The call stack must live BELOW the PC-88 VRAM window (0xC000-0xFFFF):
+ * guest code banks that window to the VRAM planes / ALU during draws,
+ * which would redirect stack pushes and pops (and the sentinel) into
+ * VRAM. The genuine interpreter's stack is in its own RAM for the same
+ * reason. 0xBF00 sits between PMD (0xAA00+) and the window, clear of
+ * the song/DB load areas. (Found 2026-11-18: with the stack at 0xF000,
+ * XDD 8's decompressor returned through VRAM bytes and slid away.) */
+#define STACK_INIT  0xBF00u
 #define SENTINEL    0xFFFFu
 #define PMD_START   0xAA00u
 #define PMD_END     0xAFFFu
@@ -247,6 +254,91 @@ static int latched = 0;
 static int sub_dac = 0;         /* subsystem DAC status */
 static unsigned char misc_port[256];
 
+/* Graphics VRAM and the C000-FFFF window (PC-88 memory banking).
+ * On the real machine the CPU window C000-FFFF can be switched away
+ * from main RAM to the graphics planes:
+ *   - ports 5Ch/5Dh/5Eh select plane B/R/G (bank mode), 5Fh = main RAM;
+ *   - port 32h bit 6 (EVRAM) + port 35h bit 7 (VACCESS) select the ALU
+ *     extended-access mode, where port 34h (ALU1) picks per-plane
+ *     set/clear/xor/hold and port 35h bits 4-5 the ALU mode.
+ * NEOMSC's display services draw through this window (glyph copies via
+ * the ALU, CG decompression via the banks). Without it the draws land
+ * in flat RAM and destroy the song table at C800 and song data at
+ * CA00/5500-adjacent ranges -- the root cause of the post-load-base
+ * MENU failure (line-2040 overflow, silent attract). Only the Z80 bus
+ * view is banked; the interpreter's own PEEK/POKE stay on flat RAM,
+ * matching how the drivers always restore MAIN before returning. */
+static unsigned char gvram[3][0x4000];  /* planes: 0=B, 1=R, 2=G */
+static int mem_bank = 3;                /* 0..2 = plane, 3 = main RAM */
+static int intr_level = 7;              /* port E4 priority level: the
+                                         * sound interrupt needs >= 5,
+                                         * VSYNC (VRTC) >= 2 (QUASI88's
+                                         * intr model; PMD's mstop drops
+                                         * the level to 2 to silence the
+                                         * sequencer, mstart raises 5) */
+static unsigned long alu_buf = 0;       /* ALU read latch (32-bit) */
+
+static int vram_way(void)               /* 0 = RAM, 1 = bank, 2 = ALU */
+{
+    if ((misc_port[0x32] & 0x40) && (misc_port[0x35] & 0x80)) return 2;
+    if (mem_bank != 3) return 1;
+    return 0;
+}
+
+static unsigned char alu_read(unsigned addr)
+{
+    /* ALU2 bits 0-2 are the compare data: the read returns the AND,
+     * over the three planes, of (plane byte) where the plane's
+     * compare bit is 1 and of (~plane byte) where it is 0. The
+     * 3-plane word is latched for the ALU write-back modes. */
+    unsigned char r = 0xFF;
+    int i;
+    alu_buf = (unsigned long)gvram[0][addr]
+            | ((unsigned long)gvram[1][addr] << 8)
+            | ((unsigned long)gvram[2][addr] << 16);
+    for (i = 0; i < 3; i++) {
+        unsigned char b = gvram[i][addr];
+        r &= (misc_port[0x35] & (1 << i)) ? b : (unsigned char)~b;
+    }
+    return r;
+}
+
+static void alu_write(unsigned addr, unsigned char data)
+{
+    int i, mode;
+    switch (misc_port[0x35] & 0x30) {
+    case 0x00:                          /* per-plane set/clear/xor/hold */
+        mode = misc_port[0x34];
+        for (i = 0; i < 3; i++, mode >>= 1) {
+            switch (mode & 0x11) {
+            case 0x00: gvram[i][addr] &= (unsigned char)~data; break;
+            case 0x01: gvram[i][addr] |= data; break;
+            case 0x10: gvram[i][addr] ^= data; break;
+            default: break;             /* 0x11: hold */
+            }
+        }
+        break;
+    case 0x10:                          /* latched word write-back */
+        gvram[0][addr] = (unsigned char)(alu_buf & 0xFF);
+        gvram[1][addr] = (unsigned char)((alu_buf >> 8) & 0xFF);
+        gvram[2][addr] = (unsigned char)((alu_buf >> 16) & 0xFF);
+        break;
+    case 0x20:
+        gvram[0][addr] = (unsigned char)((alu_buf >> 8) & 0xFF);
+        break;
+    default:
+        gvram[1][addr] = (unsigned char)(alu_buf & 0xFF);
+        break;
+    }
+}
+
+/* Read-only access for the engine's frame composer. */
+const unsigned char *vessel_vram_plane(int bank)
+{
+    if (bank < 0 || bank > 2) return 0;
+    return gvram[bank];
+}
+
 /* OPNA (YM2608) register file. Both PC-88 port pairs are tracked:
  * 44h/45h + 46h/47h and A8h-A9h + AAh/ABh (bank 0 / bank 1).
  * Bank 0 registers 26h (Timer B counter) and 27h (timer control)
@@ -264,7 +356,7 @@ static void opn_write(int bank, int addr, int v)
     if (bank == 1) { opn_nwrite1[addr]++; return; }
     if (bank == 0) {
         opn_nwrite[addr]++;
-        if (addr == 0x27 && (v & 0x08)) tb_flag = 0;    /* RST B */
+        if (addr == 0x27 && (v & 0x20)) tb_flag = 0;    /* RST B (bit 5) */
         if (tracing() && (addr == 0x26 || addr == 0x27))
             fprintf(stderr, "VESSEL OPN reg %02X <- %02X\n", addr, v);
     }
@@ -353,6 +445,15 @@ void vessel_port_out(int port, int v)
     case 0x46: case 0xAA: opn_addr[1] = v; break;
     case 0x47: case 0xAB: opn_write(1, opn_addr[1], v); break;
     case 0x31: case 0x32: case 0x34: case 0x35: misc_port[port] = (unsigned char)v; break;
+    case 0xE4: intr_level = (v & 0x08) ? 7 : (v & 0x07); break;
+    case 0x5C: mem_bank = 0; break;     /* VRAM plane B */
+    case 0x5D: mem_bank = 1; break;     /* VRAM plane R */
+    case 0x5E: mem_bank = 2; break;     /* VRAM plane G */
+    case 0x5F: mem_bank = 3; break;     /* main RAM */
+    }
+    if (port >= 0x5C && port <= 0x5F && getenv("P8P_TRACE_BANK")) {
+        static int nb = 0;
+        if (nb < 200) { nb++; fprintf(stderr, "BANK %02X pc=%04X\n", port, (unsigned)cpu.pc); }
     }
 }
 
@@ -361,6 +462,11 @@ void vessel_port_out(int port, int v)
 static uint8_t mem_read(void *ud, uint16_t addr)
 {
     (void)ud;
+    if (addr >= 0xC000) {
+        int w = vram_way();
+        if (w == 2) return alu_read(addr & 0x3FFF);
+        if (w == 1) return gvram[mem_bank][addr & 0x3FFF];
+    }
     return (uint8_t)hal_peek(0, addr);
 }
 
@@ -385,6 +491,11 @@ static void mem_write(void *ud, uint16_t addr, uint8_t v)
         watch_left--;
         fprintf(stderr, "ZW %04X <- %02X pc=%04X\n", addr, v,
                 (unsigned)cpu.pc);
+    }
+    if (addr >= 0xC000) {
+        int w = vram_way();
+        if (w == 2) { alu_write(addr & 0x3FFF, v); return; }
+        if (w == 1) { gvram[mem_bank][addr & 0x3FFF] = v; return; }
     }
     hal_poke(0, addr, v);
 }
@@ -433,6 +544,50 @@ static long stream_number(unsigned *php)
     return neg ? -v : v;
 }
 
+/* Prime the argument descriptor with the FIRST argument's value, the
+ * way the genuine interpreter's extension-statement dispatcher does
+ * before it jumps through the EEA1/EEA4 vectors: the FFDD/FFDE handler
+ * heads fetch their service number by calling the ROM evaluator helper
+ * (0x9F84), which returns (0xEC41) — a cell the dispatcher has already
+ * filled. Our vessel cannot run the ROM evaluator, so the relay primes
+ * the descriptor itself; without this the head reads a stale value,
+ * the CP 8 / CP 9 dispatch misses, and the call falls into the generic
+ * parameter collector (found 2026-11-18 via the PROBE39 step trace:
+ * XDD 8 never reached the CG decompressor). */
+void vessel_prime_arg(long v)
+{
+    hal_poke(0, 0xEC44, 2);
+    hal_poke(0, 0xEC45, (int)(v & 0xFF));
+    hal_poke(0, 0xEC46, (int)((v >> 8) & 0xFF));
+    hal_poke(0, 0xEC41, (int)(v & 0xFF));
+    hal_poke(0, 0xEC42, (int)((v >> 8) & 0xFF));
+}
+
+/* Skip one token at p in a BASIC token stream (the forms the PC-88
+ * tokenizer / our synthesizer produce): a quoted string, a run of
+ * digit tokens / ASCII digits (one number), a prefixed numeric
+ * constant, or a single command letter. Returns the new pointer. */
+static unsigned stream_skip_token(unsigned p)
+{
+    int b = hal_peek(0, p);
+    if (b == 0x22) {                        /* quoted string */
+        p++;
+        while (hal_peek(0, p) != 0x22 && hal_peek(0, p) != 0) p++;
+        if (hal_peek(0, p) == 0x22) p++;
+        return p;
+    }
+    if ((b >= 0x11 && b <= 0x1A) || (b >= '0' && b <= '9')) {
+        while ((hal_peek(0, p) >= 0x11 && hal_peek(0, p) <= 0x1A)
+               || (hal_peek(0, p) >= '0' && hal_peek(0, p) <= '9')) p++;
+        return p;
+    }
+    if (b == 0x0F) return p + 2;            /* int8 */
+    if (b == 0x1C || b == 0x0C || b == 0x0B || b == 0x0E) return p + 3;
+    if (b == 0x1D) return p + 5;            /* MBF single */
+    if (b == 0x1F) return p + 9;            /* MBF double */
+    return p + 1;                           /* letter / anything else */
+}
+
 /* check PC traps: -1 = stop, 1 = handled (PC changed), 0 = execute normally */
 static int trap(void)
 {
@@ -442,11 +597,23 @@ static int trap(void)
         ret = rd16(cpu.sp);
         if (tracing()) { fprintf(stderr, "VESSEL RST8 svc %02X at %04X", hal_peek(0, ret), ret); trace_regs(); }
         if (hal_peek(0, ret) == 0x2C) {
-            /* svc 0x2C: skip the separator at HL, evaluate the next
-             * argument and leave its descriptor at (0xEC41):
-             * [type, lo, hi]. The driver's readers fetch it from there. */
+            /* svc 0x2C: advance HL past the argument the caller just
+             * consumed (HL points AT that token on entry — the ROM
+             * evaluator advances its own pointer, not HL, so this
+             * service is what re-syncs HL), skip the separator,
+             * evaluate the next argument and leave its descriptor at
+             * (0xEC41): [type, lo, hi]. The driver's readers fetch it
+             * from there. If HL already sits on the separator (the
+             * FFDF handler consumes its command letter itself), no
+             * token is skipped. (Semantics pinned 2026-11-18 from the
+             * PROBE39 step trace: with the old skip-separator-only
+             * reading, every collector store landed one argument
+             * early and the FFDD CG path re-read its service number
+             * as the CG address.) */
             unsigned p = (unsigned)cpu.h << 8 | cpu.l;
             long v;
+            while (hal_peek(0, p) == 0x20) p++;
+            if (hal_peek(0, p) != 0x2C) p = stream_skip_token(p);
             while (hal_peek(0, p) == 0x20) p++;
             if (hal_peek(0, p) == 0x2C) p++;
             while (hal_peek(0, p) == 0x20) p++;
@@ -454,6 +621,12 @@ static int trap(void)
             hal_poke(0, 0xEC44, 2);
             hal_poke(0, 0xEC45, (int)(v & 0xFF));
             hal_poke(0, 0xEC46, (int)((v >> 8) & 0xFF));
+            /* NEOMSC's in-image argument readers also fetch the value
+             * directly at (0xEC41) [lo] / (0xEC42) [hi] — the FFDD
+             * parameter collector stores (0xEC41) verbatim, which is
+             * how the descriptor's home was identified (2026-11-18). */
+            hal_poke(0, 0xEC41, (int)(v & 0xFF));
+            hal_poke(0, 0xEC42, (int)((v >> 8) & 0xFF));
             cpu.h = (uint8_t)(p >> 8); cpu.l = (uint8_t)p;
         }
         cpu.sp = (uint16_t)(cpu.sp + 2);
@@ -467,9 +640,14 @@ static int trap(void)
         emu_ret();
         return 1;
     }
-    if (pc == 0xA794) {     /* NEOMSC's argument fetch (a slot the ROM's
-                             * registration call patches on hardware):
-                             * DE = the evaluated 16-bit argument. */
+    if (pc == 0xA794) {     /* NEOMSC's argument fetch: the in-image
+                             * routine here chains into ROM evaluators
+                             * (0x11D3 / 0x1B9D) that the vessel cannot run,
+                             * so the fetch is emulated from the RST 8
+                             * svc 0x2C descriptor: DE = the evaluated
+                             * 16-bit argument. The address is absolute in
+                             * NEOMSC's code and does NOT move with the
+                             * load base (0x9900 per its BSAVE header). */
         cpu.e = (uint8_t)hal_peek(0, 0xEC45);
         cpu.d = (uint8_t)hal_peek(0, 0xEC46);
         emu_ret();
@@ -539,34 +717,44 @@ static void irq_advance(long cycles)
         if (tb_left <= 0) {
             tb_left += tb_period();
             tb_flag = 1;
-            if (opn_reg[0][0x27] & 0x20) tb_due = 1;    /* IRQ enable B */
+            if (opn_reg[0][0x27] & 0x08) tb_due = 1;    /* IRQ enable B (bit 3) */
         }
     }
 }
 
-/* Queue at most one interrupt with the CPU core (Timer B first). */
+/* Queue at most one interrupt with the CPU core (Timer B first).
+ * Deliveries are gated by the port-E4 priority level, as on hardware:
+ * the sound interrupt needs level >= 5, VSYNC >= 2; a request whose
+ * level is too low stays pending (the PIC latches it) until the level
+ * rises. */
 static void irq_service(void)
 {
     unsigned h;
     if (cpu.int_pending) return;
-    if (tb_due) {
-        tb_due = 0;
+    if (tb_due && intr_level >= 5) {
         h = rd16((IRQ_PAGE << 8) | OPN_VEC);
         if (h >= 0x8000) {
+            tb_due = 0;
             if (!slot_opn_seen && tracing()) fprintf(stderr, "VESSEL OPN int handler %04X\n", h);
             slot_opn_seen = 1;
+            if (getenv("P8P_TRACE_SP") && mem_bank != 3)
+                fprintf(stderr, "IRQFIRE bank=%d alu=%d pc=%04X\n",
+                        mem_bank, vram_way(), (unsigned)cpu.pc);
             z80_gen_int(&cpu, OPN_VEC);
             return;
         }
+        tb_due = 0;
     }
-    if (vrtc_due) {
-        vrtc_due = 0;
+    if (vrtc_due && intr_level >= 2) {
         h = rd16((IRQ_PAGE << 8) | VRTC_VEC);
         if (h >= 0x8000) {
+            vrtc_due = 0;
             if (!slot_vrtc_seen && tracing()) fprintf(stderr, "VESSEL VRTC int handler %04X\n", h);
             slot_vrtc_seen = 1;
             z80_gen_int(&cpu, VRTC_VEC);
+            return;
         }
+        vrtc_due = 0;
     }
 }
 
@@ -585,17 +773,27 @@ void vessel_init(void)
      * handler at 0xE808 gets an EI;RET stub for the handler chain. */
     cpu.i = IRQ_PAGE;
     cpu.interrupt_mode = 2;
+    memset(gvram, 0, sizeof(gvram));
+    mem_bank = 3;
+    misc_port[0x34] = 0x77;             /* QUASI88 reset value */
+    misc_port[0x32] = 0;
+    misc_port[0x35] = 0;
     hal_poke(0, 0xE808, 0xFB);
     hal_poke(0, 0xE809, 0xC9);
     hal_poke(0, REST_CELL, 0xC9);
-    /* The interpreter's evaluated-argument descriptor lives at (0xEC41);
-     * point it at a scratch block the RST 8 trap fills in. */
-    hal_poke(0, 0xEC41, 0x44);
-    hal_poke(0, 0xEC42, 0xEC);
+    /* The interpreter's evaluated-argument value lives at (0xEC41)
+     * [lo] / (0xEC42) [hi]; the RST 8 trap also mirrors it into the
+     * scratch block at 0xEC44 ([type][lo][hi]) that the trapped ROM
+     * readers (0x18A3 / 0xA794) fetch from. */
+    hal_poke(0, 0xEC41, 0);
+    hal_poke(0, 0xEC42, 0);
     hal_poke(0, 0xEC44, 0);
     hal_poke(0, 0xEC45, 0);
     hal_poke(0, 0xEC46, 0);
 }
+
+static unsigned short pc_ring[64];
+static int pc_ring_pos;
 
 static long run_loop_body(void)
 {
@@ -607,7 +805,20 @@ static long run_loop_body(void)
         t = trap();
         if (t < 0) return n;
         if (t > 0) continue;
-        if (steps) fprintf(stderr, "STEP %04X %02X\n", (unsigned)cpu.pc, hal_peek(0, cpu.pc));
+        if (steps) fprintf(stderr, "STEP %04X %02X SP=%04X\n", (unsigned)cpu.pc, hal_peek(0, cpu.pc), (unsigned)cpu.sp);
+        if (getenv("P8P_TRACE_SP") && (cpu.pc == 0xA4A9 || cpu.pc == 0xA4EA
+            || cpu.pc == 0xA566 || cpu.pc == 0xA4D6 || cpu.pc == 0x8F03))
+            fprintf(stderr, "SPCHK pc=%04X sp=%04X top=%04X iy=%04X\n",
+                    (unsigned)cpu.pc, (unsigned)cpu.sp, rd16(cpu.sp),
+                    (unsigned)cpu.iy);
+        pc_ring[pc_ring_pos & 63] = (unsigned short)cpu.pc; pc_ring_pos++;
+        if (getenv("P8P_TRACE_SP")) {
+            unsigned h = rd16((IRQ_PAGE << 8) | OPN_VEC);
+            if (cpu.pc == h && h >= 0x8000 && pc_ring_pos >= 2
+                && pc_ring[(pc_ring_pos - 2) & 63] != (unsigned short)h)
+                fprintf(stderr, "IRQACPT from=%04X bank=%d alu=%d\n",
+                        pc_ring[(pc_ring_pos - 2) & 63], mem_bank, vram_way());
+        }
         z80_step(&cpu);
         {   /* emulated time follows the CPU's own cycle counter */
             unsigned long now = cpu.cyc;
@@ -621,7 +832,19 @@ static long run_loop_body(void)
             return n;
         }
     }
-    fprintf(stderr, "VESSEL step cap reached at %04X, stopped\n", (unsigned)cpu.pc);
+    fprintf(stderr, "VESSEL step cap reached at %04X, stopped"
+            " [A=%02X HL=%04X DE=%04X BC=%04X SP=%04X]\n",
+            (unsigned)cpu.pc, cpu.a,
+            (unsigned)((cpu.h << 8) | cpu.l),
+            (unsigned)((cpu.d << 8) | cpu.e),
+            (unsigned)((cpu.b << 8) | cpu.c), (unsigned)cpu.sp);
+    if (getenv("P8P_TRACE_SP")) {   /* recent-PC ring, for spin diagnosis */
+        int i;
+        fprintf(stderr, "RECENT:");
+        for (i = 0; i < 64; i++)
+            fprintf(stderr, " %04X", pc_ring[(pc_ring_pos + i) & 63]);
+        fprintf(stderr, "\n");
+    }
     return -1;
 }
 

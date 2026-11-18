@@ -11,6 +11,7 @@
 #include "basic.h"
 #include "engine.h"
 #include "halp8.h"
+#include "vessel.h"
 #include "p8internal.h"
 #include "p88disk.h"
 #include "p88conv.h"
@@ -264,12 +265,28 @@ void p8_frame(P8Engine *e, unsigned char *rgba)
     static const unsigned char blank_gfx[400 * 640];
     const unsigned char *g = halp8_gfx_visible()
         ? halp8_gfx(halp8_gfx_display_page()) : blank_gfx;
-    int x, y;
+    const unsigned char *vp[3];
+    int x, y, gfx_on = halp8_gfx_visible();
     (void)e;
+    vp[0] = vessel_vram_plane(0);       /* B */
+    vp[1] = vessel_vram_plane(1);       /* R */
+    vp[2] = vessel_vram_plane(2);       /* G */
     for (y = 0; y < 400; y++) {
         for (x = 0; x < 640; x++) {
             int idx = g[y * 640 + x], r, gg, b;
             unsigned char *p = rgba + (y * 640 + x) * 4;
+            if (gfx_on && vp[0]) {
+                /* Vessel VRAM: 80 bytes x 200 lines per plane, shown
+                 * line-doubled. Where the guest drew through the
+                 * C000 window it wins over the interpreter's own
+                 * graphics plane (on hardware they are one memory). */
+                int off = (y >> 1) * 80 + (x >> 3);
+                int bit = 7 - (x & 7);
+                int vi = ((vp[0][off] >> bit) & 1)
+                       | (((vp[1][off] >> bit) & 1) << 1)
+                       | (((vp[2][off] >> bit) & 1) << 2);
+                if (vi) idx = vi;
+            }
             halp8_palette(idx, &r, &gg, &b);
             p[0] = (unsigned char)r;
             p[1] = (unsigned char)gg;

@@ -264,10 +264,31 @@ void stmt_bload(void)
         }
         for (i = 0; i < len; i++) { c = fgetc(fp); if (c == EOF) break; hal_poke(seg, (unsigned)(off + i), c); }
     } else {
-        /* raw image: default to the machine area above CLEAR ,m */
+        /* PC-88 BSAVE format: a 4-byte header [load addr][end addr]
+         * precedes the payload, and BLOAD places the payload at the
+         * header's load address (an explicit ,addr overrides it).
+         * Without a sane header, fall back to a raw load into the
+         * machine area above CLEAR ,m (PC-98 style). Getting this
+         * wrong shifts position-dependent code: NEOMSC's header says
+         * 0x9900, and loading it at 0x9800 broke every absolute
+         * reference inside it (found via a QUASI88 state dump). */
+        long cap = 1L << 16, n = 0;
+        unsigned char *buf = (unsigned char *)malloc((size_t)cap);
+        if (!buf) { fclose(fp); berror(E_OUT_OF_MEM); }
+        buf[n++] = (unsigned char)c;
+        while ((c = fgetc(fp)) != EOF && n < cap) buf[n++] = (unsigned char)c;
+        if (n >= 4) {
+            unsigned lad = (unsigned)buf[0] | ((unsigned)buf[1] << 8);
+            unsigned ead = (unsigned)buf[2] | ((unsigned)buf[3] << 8);
+            if (lad && lad < ead && (long)(ead - lad) <= n - 4) {
+                if (off < 0) off = (long)lad;
+                memmove(buf, buf + 4, (size_t)(n - 4));
+                n -= 4;
+            }
+        }
         if (off < 0) off = p8_mem_top ? (long)((p8_mem_top + 1) & 0xFFFF) : 0x8000L;
-        i = 0;
-        while (c != EOF) { hal_poke(seg, (unsigned)(off + i), c); i++; c = fgetc(fp); }
+        for (i = 0; i < n; i++) hal_poke(seg, (unsigned)(off + i), buf[i]);
+        free(buf);
     }
     fclose(fp);
     vessel_notify_load((unsigned)off, i);

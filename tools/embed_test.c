@@ -11,7 +11,9 @@
 #include <string.h>
 #include <unistd.h>
 #include "engine.h"
+#include "vessel.h"
 #include "hal.h"        /* KC_* */
+#include "halp8.h"
 
 static void dump_text(P8Engine *e)
 {
@@ -34,6 +36,20 @@ static void dump_text(P8Engine *e)
         while (o > 0 && line[o - 1] == ' ') o--;
         line[o] = 0;
         printf("%02d|%s\n", y, line);
+    }
+}
+
+static void dump_attrs(P8Engine *e)
+{
+    /* raw attribute plane (halp8 model, one byte per cell) */
+    const unsigned char *ta = halp8_text_attrs();
+    int x, y;
+    (void)e;
+    printf("----- ATTRS (raw) -----\n");
+    for (y = 0; y < 25; y++) {
+        printf("%02d|", y);
+        for (x = 0; x < 80; x++) printf("%02x", ta[y * 80 + x]);
+        printf("\n");
     }
 }
 
@@ -139,7 +155,18 @@ int main(int argc, char **argv)
     }
     printf("running=%d audio_frames=%ld dropped=%lu\n",
            p8_running(e), got, p8_audio_dropped(e));
+    if (getenv("P8P_VRAMDUMP")) {
+        int b;
+        for (b = 0; b < 3; b++) {
+            char path[32];
+            FILE *f;
+            snprintf(path, sizeof(path), "vram%d.bin", b);
+            f = fopen(path, "wb");
+            if (f) { fwrite(vessel_vram_plane(b), 1, 0x4000, f); fclose(f); }
+        }
+    }
     dump_text(e);
+    dump_attrs(e);
     dump_ppm(e, "embed_gfx.ppm");
     wav_write("embed_audio.wav", drain, got);
     p8_stop(e);
