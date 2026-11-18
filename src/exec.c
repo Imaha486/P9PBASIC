@@ -1448,16 +1448,19 @@ static void stmt_ext(int which)
     } else if (which == 1 && nnum >= 1) {
         /* XDE services with statement-level equivalents in the
          * vessel: 0 = raw sector read into guest memory, 1 = the
-         * ADPCM block bulk load into the SB2 sample RAM. Service 2
+         * ADPCM block bulk load into the SB2 sample RAM. The
+         * second argument selects the bundled disk image (a .D88
+         * file can hold a multi-disk set; MA2026's songs live on
+         * image 1, everything else on image 0). Service 2
          * (DRAM -> guest copy) is unreachable in MA2026's shipped
          * configuration (MENU.ALP forces RD=1, so the per-song
          * loads always take the service 0 path), and service 3 is
          * the staff-roll text service; both stay trace-only. */
         if (nums[0] == 0 && nnum >= 6)
-            vessel_disk_read((int)nums[2], (int)nums[3], (int)nums[4],
-                             (unsigned)(nums[5] & 0xFFFF));
+            vessel_disk_read((int)nums[1], (int)nums[2], (int)nums[3],
+                             (int)nums[4], (unsigned)(nums[5] & 0xFFFF));
         else if (nums[0] == 1 && nnum >= 4)
-            vessel_dram_load((int)nums[2], (int)nums[3]);
+            vessel_dram_load((int)nums[1], (int)nums[2], (int)nums[3]);
         else if (hal_peek(0, 0x994D) == 0xCD) {
             /* Other XDE services (2 = DRAM copy, 3 = staff roll):
              * relay to NEOMSC's FFDE handler (the EEA4 vector's

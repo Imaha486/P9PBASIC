@@ -15,8 +15,8 @@ long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned 
 long vessel_call_pushed(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de, unsigned pushed); /* call with preset registers */
 int  vessel_d88_sector(int t, int r, unsigned char *dst); /* raw D88 sector (t = cyl*2+head) */
 const unsigned char *vessel_vram_plane(int bank); /* graphics VRAM planes 0=B,1=R,2=G; 80x200 bytes each */
-int  vessel_disk_read(int ltrack, int sector, int count, unsigned addr);
-int  vessel_dram_load(int ltrack, int tracks); /* FFDE service 0: raw sector read from P8P_DISK */
+int  vessel_disk_read(int img, int ltrack, int sector, int count, unsigned addr);
+int  vessel_dram_load(int img, int ltrack, int tracks); /* FFDE services 0/1: raw sector reads from P8P_DISK (img = bundled disk image index) */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */
 void vessel_prime_arg(long v);  /* plant the first-arg descriptor (EC41/EC44) as the ROM dispatcher would */
 void vessel_pump(void);                            /* advance emulated time + deliver due interrupts (call while BASIC runs) */

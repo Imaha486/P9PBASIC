@@ -75,6 +75,16 @@ static unsigned char d88[D88_MAX];
 static long d88_size = 0;
 static int d88_state = 0;   /* 0 = not tried, 1 = ok, -1 = unavailable */
 
+/* A .D88 file can bundle several disk images (a multi-disk set);
+ * each image's header carries its total size at +0x1C. NEOMSC's
+ * XDE services take the image index as their second argument
+ * (MA2026: image 0 = "MusicArena2026 A", image 1 = "... B" — the
+ * song data lives on B, everything else on A). Bases are recorded
+ * at open; an out-of-range index falls back to image 0. */
+#define D88_MAX_IMAGES 8
+static long d88_image_base[D88_MAX_IMAGES];
+static int d88_image_count = 0;
+
 static int d88_open(void)
 {
     const char *fn;
@@ -88,8 +98,29 @@ static int d88_open(void)
     d88_size = (long)fread(d88, 1, (size_t)D88_MAX, fp);
     fclose(fp);
     if (d88_size < 0x20 + 164 * 4) return 0;
+    d88_image_count = 0;
+    {
+        long off = 0;
+        while (off + 0x20 + 164 * 4 <= d88_size &&
+               d88_image_count < D88_MAX_IMAGES) {
+            long isz = (long)((unsigned long)d88[off + 0x1C] |
+                       ((unsigned long)d88[off + 0x1D] << 8) |
+                       ((unsigned long)d88[off + 0x1E] << 16) |
+                       ((unsigned long)d88[off + 0x1F] << 24));
+            d88_image_base[d88_image_count++] = off;
+            if (isz < 0x20 + 164 * 4 || off + isz > d88_size) break;
+            off += isz;
+        }
+    }
+    if (d88_image_count == 0) { d88_image_base[0] = 0; d88_image_count = 1; }
     d88_state = 1;
     return 1;
+}
+
+static long d88_base(int img)
+{
+    if (img < 0 || img >= d88_image_count) return 0;
+    return d88_image_base[img];
 }
 
 static unsigned d88_u16(long p)
@@ -102,19 +133,21 @@ static unsigned long d88_u32(long p)
     return (unsigned long)d88_u16(p) | ((unsigned long)d88_u16(p + 2) << 16);
 }
 
-/* copy sector r of subsystem track t (256 bytes) to dst; 0 on error */
-static int d88_read_sector(int t, int r, unsigned char *dst)
+/* copy sector r of subsystem track t (256 bytes) of disk image
+ * `img` to dst; 0 on error */
+static int d88_read_sector_img(int img, int t, int r, unsigned char *dst)
 {
     int cyl, head, n, count;
     unsigned long block;
-    long pos;
+    long pos, base;
     unsigned dsize, cp;
     if (!d88_open()) return 0;
     if (t < 0 || t >= 164) return 0;
+    base = d88_base(img);
     cyl = t >> 1; head = t & 1;
-    block = d88_u32(0x20 + (long)(cyl * 2 + head) * 4);
-    if (block == 0 || block + 16 > (unsigned long)d88_size) return 0;
-    pos = (long)block;
+    block = d88_u32(base + 0x20 + (long)(cyl * 2 + head) * 4);
+    if (block == 0 || base + (long)block + 16 > d88_size) return 0;
+    pos = base + (long)block;
     count = (int)d88_u16(pos + 4);   /* sectors in this track */
     if (count <= 0 || count > 64) count = 64;
     for (n = 0; n < count && pos + 16 <= d88_size; n++) {
@@ -130,6 +163,13 @@ static int d88_read_sector(int t, int r, unsigned char *dst)
         pos += 16 + (long)dsize;
     }
     return 0;
+}
+
+/* image 0 reader: the disk subsystem model and the file layer
+ * address the boot disk only */
+static int d88_read_sector(int t, int r, unsigned char *dst)
+{
+    return d88_read_sector_img(0, t, r, dst);
 }
 
 /* public raw sector access (track = cyl*2+head, r = sector id) for
@@ -973,21 +1013,51 @@ long vessel_call_pushed(unsigned entry, unsigned a, unsigned hl, unsigned bc, un
     return run_loop();
 }
 
+/* Emulated time a native XDE transfer spends per 256-byte sector.
+ * On the genuine machine the CPU waits in NEOMSC's subsystem poll
+ * while a 2D floppy delivers roughly 30 sectors a second (seek +
+ * rotational latency), and the interrupt handlers — the BGM
+ * sequencer above all — keep running throughout the wait. The
+ * native equivalents therefore burn the same time sector by
+ * sector through the pump, which delivers due handlers as it
+ * goes. Without this, MA2026's loading BGM (started just before
+ * the 448-sector ADPCM load) collapses to a fraction of a second
+ * and the whole boot sequence runs in the wrong order of
+ * durations (measured against QUASI88: BGM audible ~19 s). */
+#define XDE_SECTOR_CYCLES 133333L   /* 4 MHz / 30 sectors per sec */
+
+static void vessel_burn(long cycles)
+{
+    while (cycles > 0) {
+        vessel_pump();
+        /* The burn is emulated time passing inside a single
+         * statement, where exec_loop's per-statement pacing never
+         * runs: give the HAL its poll so a pacing host (the
+         * embedded engine) can hold the audio lead against the
+         * wall clock instead of flooding its ring buffer and
+         * dropping the very music this wait exists to let play.
+         * The host harness's poll is a no-op (offline rendering). */
+        hal_poll();
+        cycles -= PUMP_SLICE;
+    }
+}
+
 /* FFDE service 1 equivalent: bulk-load `tracks` logical tracks
- * starting at logical track `ltrack` from the P8P_DISK image into
- * the OPNA's ADPCM-A sample RAM (the Sound Board II DRAM that
- * PMD's PCM driver plays from), starting at DRAM offset 0.
- * Returns the number of sectors loaded. */
-int vessel_dram_load(int ltrack, int tracks)
+ * starting at logical track `ltrack` from disk image `img` of the
+ * P8P_DISK file into the OPNA's ADPCM-A sample RAM (the Sound
+ * Board II DRAM that PMD's PCM driver plays from), starting at
+ * DRAM offset 0. Returns the number of sectors loaded. */
+int vessel_dram_load(int img, int ltrack, int tracks)
 {
     unsigned char buf[256];
     int n = 0, t, r, b;
     unsigned long dst = 0;
     for (t = ltrack; t < ltrack + tracks; t++) {
         for (r = 1; r <= 16; r++) {
-            if (!d88_read_sector(t, r, buf)) return n;
+            if (!d88_read_sector_img(img, t, r, buf)) return n;
             for (b = 0; b < 256; b++) opna_adpcm_a_write(dst++, buf[b]);
             n++;
+            vessel_burn(XDE_SECTOR_CYCLES);
         }
     }
     if (tracing()) fprintf(stderr, "VESSEL dram_load ltrack %d tracks %d (%d sectors)\n",
@@ -996,18 +1066,19 @@ int vessel_dram_load(int ltrack, int tracks)
 }
 
 /* FFDE service 0 equivalent: read count 256-byte sectors starting at
- * (logical track, sector) from the P8P_DISK image into guest memory.
- * Logical track = cylinder * 2 + head, sector = 1..16 (D88 order).
- * Returns the number of sectors read. */
-int vessel_disk_read(int ltrack, int sector, int count, unsigned addr)
+ * (logical track, sector) from disk image `img` of the P8P_DISK
+ * file into guest memory. Logical track = cylinder * 2 + head,
+ * sector = 1..16 (D88 order). Returns the number of sectors read. */
+int vessel_disk_read(int img, int ltrack, int sector, int count, unsigned addr)
 {
     unsigned char buf[256];
     int i, t = ltrack, r = sector;
     for (i = 0; i < count; i++) {
         int j;
-        if (!d88_read_sector(t, r, buf)) break;
+        if (!d88_read_sector_img(img, t, r, buf)) break;
         for (j = 0; j < 256; j++) hal_poke(0, (addr + (unsigned)i * 256u + (unsigned)j) & 0xFFFF, buf[j]);
         if (++r > 16) { r = 1; t++; }
+        vessel_burn(XDE_SECTOR_CYCLES);
     }
     if (tracing()) fprintf(stderr, "VESSEL disk_read track %d sec %d count %d -> %04X (%d read)\n",
                            ltrack, sector, count, addr, i);
