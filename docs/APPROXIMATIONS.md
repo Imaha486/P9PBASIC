@@ -76,13 +76,19 @@ P8PBASIC の実装にある近似・部分実装・環境依存を全て洗い�
    P8Bridge はまだ文字グリフで描く。(c) 点滅は位相を持たず
    常時表示、反転は属性バイトに載せていない。
 
-5. **DOS ビルド（build.sh / build.bat）がリンクできない**
-   src/fileio.c が vessel_notify_load / vessel_init / vessel_exec を
-   呼ぶが、DOS 側のソース一覧に器が無い。P9PBASIC 由来のターゲット
-   で、P8 の現行ターゲットはホスト／埋め込み。一般化の方向は
-   2択: 器（z80.c + vessel.c は移植性のある C）を DOS にも載せるか、
-   DOS ではフックを #ifdef で外して「器なし」を明示する。
-   決めるまで壊れたままにしないこと（本書がその記録）。
+5. **DOS ビルド（build.sh / build.bat）**【2026-11-19 決定・対処済】
+   P9PBASIC 由来のターゲットで、P9PBASIC.EXE（PC-98 MS-DOS）を
+   作るスクリプトがフォークに未適応のまま残っていた。器への
+   参照は fileio.c の BLOAD,R だけでなく exec.c 全体（XDE/XDD/
+   XDF リレー、文ループの vessel_pump）に及ぶため「フックだけ
+   外す」ことはできず、器なしの DOS 版は XDE 系が無言で無効な
+   インタプリタになる。16ビットラージモデルに器＋ymfm（C++）＋
+   D88 層を載せる現実性も無い。決定: DOS は P8PBASIC の
+   ターゲットとしない。build.sh / build.bat は冒頭で理由と
+   代替（build-host.sh / build-embed.sh）を明示して停止する
+   ようにした（リンク段階の不可解な失敗を排除）。スクリプト
+   自体は上流との差分を最小化するため残置する。P8 の現行
+   ターゲットはホストCLIと埋め込みエンジン。
 
 ## D: 文書化した近似（維持）
 
