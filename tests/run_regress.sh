@@ -61,6 +61,18 @@ out=$(run_probe PROBE42) || bad "PROBE42 exit"
 printf '%s\n' "$out" | grep -q 'waited' || bad "PROBE42: playback wait loop broken"
 out=$(run_probe PROBE44) || bad "PROBE44 exit"
 printf '%s\n' "$out" | grep -q 'ok44' || bad "PROBE44: CG load/draw path broken"
+# PROBE53: the FFDE service-3 staff roll renders into the guest text
+# image at 0xF3C8 (never the graphic planes -- on hardware the image
+# IS the text VRAM). Without the service-3 calls the image stays all
+# zero (control-verified), so a large nonzero count proves the
+# genuine handler ran and drew. Displaying that image in the embed
+# engine is a separate known gap: docs/APPROXIMATIONS.md.
+out=$(run_probe PROBE53) || bad "PROBE53 exit"
+printf '%s\n' "$out" | grep -q 'rolldone' || bad "PROBE53: staff roll did not complete"
+img=$(printf '%s\n' "$out" | grep -o 'img *[0-9]*' | grep -o '[0-9]*$')
+if [ -z "$img" ] || [ "$img" -lt 1000 ]; then
+  bad "PROBE53: text image count ${img:-none} < 1000 (staff roll did not render)"
+fi
 [ $FAIL -eq 0 ] && echo "Tier A ok"
 
 note "Tier A audio (standalone songs must be loud from the start)"

@@ -50,6 +50,18 @@ static void dump(void)
         }
         fclose(f);
     }
+    if (getenv("P8P_VRAMDUMP")) {
+        /* mirror tools/embed_test.c: dump the vessel's VRAM planes
+         * so host probes can verify Z80-side drawing (XDD, XDE 3) */
+        int b;
+        for (b = 0; b < 3; b++) {
+            char path[32];
+            FILE *f;
+            snprintf(path, sizeof(path), "vram%d.bin", b);
+            f = fopen(path, "wb");
+            if (f) { fwrite(vessel_vram_plane(b), 1, 0x4000, f); fclose(f); }
+        }
+    }
 }
 
 void hal_init(int f)
