@@ -79,6 +79,11 @@ out=$(run_probe PROBE42) || bad "PROBE42 exit"
 printf '%s\n' "$out" | grep -q 'waited' || bad "PROBE42: playback wait loop broken"
 out=$(run_probe PROBE44) || bad "PROBE44 exit"
 printf '%s\n' "$out" | grep -q 'ok44' || bad "PROBE44: CG load/draw path broken"
+# PROBE: *label GOTO (upstream Ver.261119 label support; on the
+# pre-merge base this errored at line 10, which the old Tier B
+# baseline honestly captured)
+out=$(run_probe PROBE) || bad "PROBE exit"
+printf '%s\n' "$out" | grep -q 'oklab' || bad "PROBE: label GOTO *FOO did not reach the label"
 # PROBE53: the FFDE service-3 staff roll renders into the guest text
 # image at 0xF3C8 as semi-graphic bitmap codes (font at 0xCA00,
 # 8 bytes per character; the scroll shifts the dot plane). With the
