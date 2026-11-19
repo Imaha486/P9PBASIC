@@ -302,6 +302,24 @@ static int latched = 0;
 static int sub_dac = 0;         /* subsystem DAC status */
 static unsigned char misc_port[256];
 
+/* RAM window at 8000-83FF (I/O 70H) and 64K-RAM mode (I/O 31H).
+ * The window normally shows the 1K page of main RAM whose base
+ * OUT 70H sets (base = value << 8; IN 70H reads it back). With
+ * port 31H bit 1 (64K-RAM) or bit 2 (N) set, the window is the
+ * identity: the CPU sees the RAM at its own address (QUASI88's
+ * main_memory_mapping_8000_83ff). The base starts at 8000H -
+ * the identity a booted N88-BASIC presents - so nothing changes
+ * unless the guest reprograms the window or the mode. Only Z80
+ * bus accesses are translated; the vessel's own services keep
+ * addressing flat RAM, as a DMA transfer would. */
+static unsigned window_base = 0x8000;
+
+static uint16_t win_addr(uint16_t addr)
+{
+    if (misc_port[0x31] & 0x06) return addr;
+    return (uint16_t)(window_base + (addr & 0x3FF));
+}
+
 /* Graphics VRAM and the C000-FFFF window (PC-88 memory banking).
  * On the real machine the CPU window C000-FFFF can be switched away
  * from main RAM to the graphics planes:
@@ -458,6 +476,7 @@ int vessel_port_in(int port)
     case 0x44: case 0xA8: return tb_flag ? 0x02 : 0x00;  /* OPNA status: never busy */
     case 0xA9: return 1;    /* Sound Board II present */
     case 0x31: case 0x32: case 0x34: case 0x35: return misc_port[port];
+    case 0x70: return (int)(window_base >> 8);   /* RAM window base */
     }
     return 0xFF;
 }
@@ -493,6 +512,7 @@ void vessel_port_out(int port, int v)
     case 0x46: case 0xAA: opn_addr[1] = v; break;
     case 0x47: case 0xAB: opn_write(1, opn_addr[1], v); break;
     case 0x31: case 0x32: case 0x34: case 0x35: misc_port[port] = (unsigned char)v; break;
+    case 0x70: window_base = (unsigned)(v & 0xFF) << 8; break;
     case 0xE4: intr_level = (v & 0x08) ? 7 : (v & 0x07); break;
     case 0x5C: mem_bank = 0; break;     /* VRAM plane B */
     case 0x5D: mem_bank = 1; break;     /* VRAM plane R */
@@ -515,6 +535,7 @@ static uint8_t mem_read(void *ud, uint16_t addr)
         if (w == 2) return alu_read(addr & 0x3FFF);
         if (w == 1) return gvram[mem_bank][addr & 0x3FFF];
     }
+    if (addr >= 0x8000 && addr < 0x8400) addr = win_addr(addr);
     return (uint8_t)hal_peek(0, addr);
 }
 
@@ -545,6 +566,7 @@ static void mem_write(void *ud, uint16_t addr, uint8_t v)
         if (w == 2) { alu_write(addr & 0x3FFF, v); return; }
         if (w == 1) { gvram[mem_bank][addr & 0x3FFF] = v; return; }
     }
+    if (addr >= 0x8000 && addr < 0x8400) addr = win_addr(addr);
     hal_poke(0, addr, v);
 }
 
@@ -874,6 +896,8 @@ void vessel_init(void)
     misc_port[0x34] = 0x77;             /* QUASI88 reset value */
     misc_port[0x32] = 0;
     misc_port[0x35] = 0;
+    misc_port[0x31] = 0;
+    window_base = 0x8000;               /* identity, as booted BASIC leaves it */
     hal_poke(0, 0xE808, 0xFB);
     hal_poke(0, 0xE809, 0xC9);
     hal_poke(0, REST_CELL, 0xC9);

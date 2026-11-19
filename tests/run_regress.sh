@@ -21,14 +21,22 @@ bad() { echo "FAIL: $*"; FAIL=1; }
 note "build"
 ./build-host.sh >/dev/null 2>&1 || { bad "build-host.sh"; echo "SUITE FAILED"; exit 1; }
 ./build-embed.sh >/dev/null 2>&1 || { bad "build-embed.sh"; echo "SUITE FAILED"; exit 1; }
-# unit checks for the engine's text-screen merge (guest text image
-# vs the interpreter's cell model); links the embed objects.
+# unit checks (text-screen merge; RAM window on the Z80 bus);
+# they link the embed objects.
 cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c tools/textmerge_test.c \
    -o build-embed/textmerge_test.o 2>/dev/null \
   && c++ -o build-embed/textmerge_test \
-       $(ls build-embed/*.o | grep -v embed_test) -lm -lpthread 2>/dev/null \
+       $(ls build-embed/*.o | grep -v embed_test | grep -v window_test) \
+       -lm -lpthread 2>/dev/null \
   && ./build-embed/textmerge_test >/dev/null \
   || bad "textmerge_test"
+cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c tools/window_test.c \
+   -o build-embed/window_test.o 2>/dev/null \
+  && c++ -o build-embed/window_test \
+       $(ls build-embed/*.o | grep -v embed_test | grep -v textmerge_test) \
+       -lm -lpthread 2>/dev/null \
+  && ./build-embed/window_test >/dev/null \
+  || bad "window_test"
 echo "build ok"
 
 if [ ! -f "$DISK" ]; then
