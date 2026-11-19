@@ -9,7 +9,8 @@ CC=${CC:-cc}
 CXX=${CXX:-c++}
 CSRC="src/exec.c src/eval.c src/var.c src/num.c src/token.c
       src/print.c src/screen.c src/graph.c src/fileio.c src/halp8.c
-      src/vessel.c src/p88disk.c src/p88conv.c src/engine.c
+      src/vessel.c src/p88disk.c src/p88conv.c src/materialize.c
+      src/engine.c
       tools/embed_test.c third_party/z80/z80.c"
 CXXSRC="src/opna_ymfm.cpp
         third_party/ymfm/src/ymfm_opn.cpp

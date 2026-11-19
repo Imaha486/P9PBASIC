@@ -13,8 +13,7 @@
 #include "halp8.h"
 #include "vessel.h"
 #include "p8internal.h"
-#include "p88disk.h"
-#include "p88conv.h"
+#include "materialize.h"
 #include "opna.h"
 
 void interp_init(void);
@@ -117,69 +116,15 @@ void p8_destroy(P8Engine *e)
     free(e);
 }
 
-/* Write the disk's files into a fresh scratch directory; BASIC
- * programs (attr 0x80) become <base>.BAS text. Returns 0 and sets
+/* Write the disk's files into a fresh scratch directory (shared
+ * with the host CLI: src/materialize.c). Returns 0 and sets
  * e->workdir / e->bootfile on success. */
 static int materialize(P8Engine *e)
 {
-    P88FileInfo files[64];
-    static unsigned char buf[1 << 20];
-    char tmpl[256];
-    const char *tmp = getenv("TMPDIR");
-    int n, i;
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(tmpl, sizeof(tmpl), "%s/p8pXXXXXX", tmp);
-    if (!mkdtemp(tmpl)) return -1;
-    e->workdir = strdup(tmpl);
-    n = p88disk_list(files, 64);
-    if (n < 0) return -1;
-    e->bootfile[0] = 0;
-    for (i = 0; i < n; i++) {
-        long sz = p88disk_read(files[i].name, buf, sizeof(buf));
-        char path[320], base[16];
-        const char *dot;
-        FILE *fp;
-        if (sz < 0) continue;
-        /* base name without extension, for the .BAS materialization */
-        memset(base, 0, sizeof(base));
-        strncpy(base, files[i].name, sizeof(base) - 1);
-        dot = strrchr(base, '.');
-        if (files[i].attr & 0x80) {
-            char *text, *report = 0;
-            unsigned long tlen = 0;
-            char matname[32];
-            if (dot) {
-                /* A tokenized file whose disk name carries an
-                 * extension (MENU.ALP) materializes as
-                 * MENU_ALP.BAS: writing MENU.BAS would collide
-                 * case-insensitively with a distinct program
-                 * named "menu" (iOS returns EEXIST), and the
-                 * guest only ever asks for the extension-less
-                 * name. */
-                char ext[4];
-                snprintf(ext, sizeof(ext), "%.3s", dot + 1);
-                *(char *)dot = 0;
-                snprintf(matname, sizeof(matname), "%.10s_%.3s.BAS",
-                         base, ext);
-            } else {
-                snprintf(matname, sizeof(matname), "%.15s.BAS", base);
-            }
-            text = p88_convert(buf, (unsigned long)sz, &tlen, &report);
-            free(report);
-            if (!text) continue;
-            snprintf(path, sizeof(path), "%s/%s", e->workdir, matname);
-            fp = fopen(path, "wb");
-            if (fp) { fwrite(text, 1, tlen, fp); fclose(fp); }
-            free(text);
-            if (!e->bootfile[0] || strcmp(base, "MENU") == 0)
-                snprintf(e->bootfile, sizeof(e->bootfile), "%s", matname);
-        } else {
-            snprintf(path, sizeof(path), "%s/%.15s", e->workdir, files[i].name);
-            fp = fopen(path, "wb");
-            if (fp) { fwrite(buf, 1, (size_t)sz, fp); fclose(fp); }
-        }
-    }
-    return e->bootfile[0] ? 0 : -1;
+    char *dir = p8_materialize(e->bootfile, sizeof(e->bootfile));
+    if (!dir) return -1;
+    e->workdir = dir;
+    return 0;
 }
 
 int p8_boot(P8Engine *e)

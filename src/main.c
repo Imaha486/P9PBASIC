@@ -1,6 +1,11 @@
 /* main.c - P9PBASIC entry point */
 #include "basic.h"
 #include <ctype.h>
+#ifdef P8_HOST_MATERIALIZE
+#include <stdlib.h>
+#include <unistd.h>
+#include "materialize.h"
+#endif
 
 void interp_init(void);
 void exec_direct_pending_set(const char *s);
@@ -22,6 +27,28 @@ int main(int argc, char **argv)
     hal_set_inp_direct(rawinp);
     scr_init();
     g_init();
+#ifdef P8_HOST_MATERIALIZE
+    /* With P8P_DISK set, boot from the disk image the way the
+     * embedded engine does: materialize its files into a scratch
+     * directory and run there, so BLOAD / RUN find the disk's own
+     * files (NEOMSC and friends) instead of whatever plain files
+     * happen to lie in the working directory. A requested program
+     * is still loaded from its own directory (absolute path);
+     * with no program named, the disk's boot program runs. */
+    if (getenv("P8P_DISK")) {
+        static char boot[32], absfn[4096];   /* realpath wants PATH_MAX */
+        char *scratch = p8_materialize(file ? 0 : boot,
+                                       file ? 0 : sizeof(boot));
+        if (scratch) {
+            if (file) {
+                if (realpath(file, absfn)) file = absfn;
+            } else if (boot[0]) {
+                file = boot;
+            }
+            if (chdir(scratch) != 0) { /* stay: legacy plain-file run */ }
+        }
+    }
+#endif
     if (file) {
         char fn[80];
         file_fname(file, (unsigned)strlen(file), fn, ".BAS");

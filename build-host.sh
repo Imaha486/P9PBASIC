@@ -13,7 +13,8 @@ CC=${CC:-cc}
 CXX=${CXX:-c++}
 CSRC="src/main.c src/exec.c src/eval.c src/var.c src/num.c src/token.c
       src/print.c src/screen.c src/graph.c src/fileio.c src/halhost.c
-      src/vessel.c third_party/z80/z80.c"
+      src/vessel.c src/p88disk.c src/p88conv.c src/materialize.c
+      third_party/z80/z80.c"
 CXXSRC="src/opna_ymfm.cpp
         third_party/ymfm/src/ymfm_opn.cpp
         third_party/ymfm/src/ymfm_ssg.cpp
@@ -21,7 +22,7 @@ CXXSRC="src/opna_ymfm.cpp
 OBJS=""
 for f in $CSRC; do
   o="build-host/$(echo "$f" | tr / _).o"
-  $CC -O1 -Ithird_party/z80 -c "$f" -o "$o"
+  $CC -O1 -DP8_HOST_MATERIALIZE -Ithird_party/z80 -Isrc -c "$f" -o "$o"
   OBJS="$OBJS $o"
 done
 for f in $CXXSRC; do

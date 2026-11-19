@@ -46,15 +46,12 @@ if [ ! -f "$DISK" ]; then
 fi
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" /tmp/p8p??????' EXIT
 cp tests/probes/*.BAS "$WORK/"
-# The host CLI's BASIC file layer (src/fileio.c) reads plain host files;
-# only the vessel's sector services read the D88 itself. Supply the
-# disk's own NEOMSC as a plain file, extracted with the repo's tool --
-# byte-identical to the file on the disk image.
-python3 tools/p88_extract.py "$DISK" "$WORK/ext" >/dev/null 2>&1 \
-  || { bad "p88_extract failed on $DISK"; echo "SUITE FAILED"; exit 1; }
-cp "$WORK/ext/NEOMSC" "$WORK/NEOMSC" || { bad "NEOMSC not in disk image"; echo "SUITE FAILED"; exit 1; }
+# With P8P_DISK set the host CLI materializes the disk's files into
+# a scratch dir itself (src/materialize.c, shared with the embedded
+# engine) and runs there, so the probes find the disk's own NEOMSC
+# without any extracted plain files in $WORK.
 
 run_probe() { # name [env assignments...]
   _n=$1; shift
