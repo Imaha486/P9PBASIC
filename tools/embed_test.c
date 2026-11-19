@@ -5,6 +5,9 @@
  *   embed_test <disk.d88> <seconds> [keys]
  * keys use the halhost escapes (\r \e \u \d \l \R \1..\0 \w=1s wait)
  * for convenience; \w waits one second of wall time here.
+ * Matrix keys: \D \U \S \E \X are momentary presses; \k \K hold /
+ * release SPACE and \t \T hold / release RETURN (INP()-polling
+ * programs need held keys, see the \k comment below).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +49,19 @@ static void dump_attrs(P8Engine *e)
     int x, y;
     (void)e;
     printf("----- ATTRS (raw) -----\n");
+    for (y = 0; y < 25; y++) {
+        printf("%02d|", y);
+        for (x = 0; x < 80; x++) printf("%02x", ta[y * 80 + x]);
+        printf("\n");
+    }
+}
+
+static void dump_mattrs(P8Engine *e)
+{
+    /* merged attribute plane (what the host app renders) */
+    const unsigned char *ta = p8_text_attrs(e);
+    int x, y;
+    printf("----- ATTRS (merged) -----\n");
     for (y = 0; y < 25; y++) {
         printf("%02d|", y);
         for (x = 0; x < 80; x++) printf("%02x", ta[y * 80 + x]);
@@ -137,6 +153,19 @@ int main(int argc, char **argv)
         case 'D': matrix_press(e, 0xA, 1); break;   /* cursor down */
         case 'U': matrix_press(e, 0x8, 1); break;   /* cursor up */
         case 'S': matrix_press(e, 0x9, 6); break;   /* SPACE */
+        /* \k / \K: SPACE down / up, held across \w waits. A momentary
+         * press can fall entirely inside a period where the guest
+         * thread is blocked on the full audio ring and never samples
+         * the matrix; INP()-polling programs need a held key. */
+        case 'k': shadow_rows[0x9] &= (unsigned char)~(1u << 6);
+                  p8_set_matrix(e, 0x9, shadow_rows[0x9]); break;
+        case 'K': shadow_rows[0x9] |= (unsigned char)(1u << 6);
+                  p8_set_matrix(e, 0x9, shadow_rows[0x9]); break;
+        /* \t / \T: RETURN down / up, held (row 1 bit 7) */
+        case 't': shadow_rows[0x1] &= (unsigned char)~(1u << 7);
+                  p8_set_matrix(e, 0x1, shadow_rows[0x1]); break;
+        case 'T': shadow_rows[0x1] |= (unsigned char)(1u << 7);
+                  p8_set_matrix(e, 0x1, shadow_rows[0x1]); break;
         case 'E': matrix_press(e, 0x1, 7); break;   /* RETURN */
         case 'X': matrix_press(e, 0x9, 7); break;   /* ESC */
         default:
@@ -167,6 +196,7 @@ int main(int argc, char **argv)
     }
     dump_text(e);
     dump_attrs(e);
+    dump_mattrs(e);
     dump_ppm(e, "embed_gfx.ppm");
     wav_write("embed_audio.wav", drain, got);
     p8_stop(e);

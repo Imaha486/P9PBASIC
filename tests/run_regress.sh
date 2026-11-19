@@ -21,6 +21,14 @@ bad() { echo "FAIL: $*"; FAIL=1; }
 note "build"
 ./build-host.sh >/dev/null 2>&1 || { bad "build-host.sh"; echo "SUITE FAILED"; exit 1; }
 ./build-embed.sh >/dev/null 2>&1 || { bad "build-embed.sh"; echo "SUITE FAILED"; exit 1; }
+# unit checks for the engine's text-screen merge (guest text image
+# vs the interpreter's cell model); links the embed objects.
+cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c tools/textmerge_test.c \
+   -o build-embed/textmerge_test.o 2>/dev/null \
+  && c++ -o build-embed/textmerge_test \
+       $(ls build-embed/*.o | grep -v embed_test) -lm -lpthread 2>/dev/null \
+  && ./build-embed/textmerge_test >/dev/null \
+  || bad "textmerge_test"
 echo "build ok"
 
 if [ ! -f "$DISK" ]; then
@@ -69,8 +77,9 @@ printf '%s\n' "$out" | grep -q 'ok44' || bad "PROBE44: CG load/draw path broken"
 # staff text -> a different image (348). Before the ROM string
 # evaluator (0x11D3) was emulated, the draw path read a stale
 # numeric descriptor and produced a fixed 1728-byte pattern
-# regardless of the text. Displaying the guest text image in the
-# embed engine is a separate known gap: docs/APPROXIMATIONS.md.
+# regardless of the text. The embed tier below checks that the
+# engine's merged text surface displays the image (staff roll
+# rows, attribute-pair recoloring) alongside interpreter text.
 out=$(run_probe PROBE53) || bad "PROBE53 exit"
 printf '%s\n' "$out" | grep -q 'rolldone' || bad "PROBE53: staff roll did not complete"
 img=$(printf '%s\n' "$out" | grep -o 'img *[0-9]*' | grep -o '[0-9]*$')
@@ -150,6 +159,24 @@ else
   bad "embed55: no audio captured"
 fi
 [ $FAIL -eq 0 ] && echo "embed audio ok"
+
+# The merged text surface: hold RETURN during attract to enter
+# *SELECT (SCREEN 0,2, list + help printed by the interpreter),
+# then check the list survived the merge (no image shadowing) and
+# that the guest image's attribute pairs recolored merged cells
+# (the pair build paints the two song columns green/cyan: merged
+# attr bytes a0 appear, the interpreter's own plane has none).
+note "embed: text merge (select screen)"
+KEYS=$(printf '\\w%.0s' $(seq 50))
+(cd /tmp && "$ROOT/build-embed/embed_test" "$DISK" 5 \
+   "${KEYS}\\t\\w\\w\\w\\T\\w" > "$WORK/embedsel.log" 2>&1)
+sed -n '/----- SCREEN -----/,/----- ATTRS (raw)/p' "$WORK/embedsel.log" \
+  | grep -q 'MEGAFEPPS MUSIC ARENA 2026' || bad "embedsel: header missing from merged text"
+sed -n '/----- SCREEN -----/,/----- ATTRS (raw)/p' "$WORK/embedsel.log" \
+  | grep -q 'Move\[ASDW' || bad "embedsel: song list / help missing from merged text"
+sed -n '/----- ATTRS (merged) -----/,$p' "$WORK/embedsel.log" \
+  | grep -q 'a0a0' || bad "embedsel: no pair-driven recoloring in merged attrs"
+[ $FAIL -eq 0 ] && echo "embed text ok"
 
 echo
 [ $FAIL -eq 0 ] && echo "SUITE PASSED" || echo "SUITE FAILED"

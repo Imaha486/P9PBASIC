@@ -296,17 +296,158 @@ void p8_frame(P8Engine *e, unsigned char *rgba)
     }
 }
 
+/* --- text screen merge -------------------------------------------------
+ * On hardware there is ONE text screen: the memory image at 0xF3C8
+ * (25 rows x 120 bytes: 80 code bytes, then 20 (column, attr)
+ * attribute pairs). Here the interpreter keeps its own cell model
+ * (halp8's tv/ta) while guest machine code (NEOMSC) writes the
+ * image directly - the staff roll renders only there, and BASIC
+ * POKEs the attribute pairs to mark the song list. Neither surface
+ * alone is what the hardware shows, so merge them the way
+ * p8_frame merges the graphics planes: the image wins where it
+ * holds a code, and its attribute pairs recolor the cells they
+ * govern (including cells whose code came from the interpreter).
+ *
+ * Attribute pairs follow the CRTC "transparent" layout: a pair
+ * (column, attr) takes effect at that column and holds until the
+ * next pair; column 0x80 as the first pair is the row default.
+ * An attr byte with bit 3 set is a color command (bits 7/6/5 =
+ * G/R/B, bit 4 = semi-graphic mode); with bit 3 clear it is a
+ * decoration command (bit 0 secret, bit 1 blink, bit 2 reverse,
+ * bit 4 upper line, bit 5 under line). The running attribute
+ * carries across rows. Color commands keep the decorations;
+ * decoration commands keep the color and the semi-graphic flag
+ * (the CRTC's color-attribute mode, which is what this program's
+ * yellow 0xC8 headers and graphic 0x18/0x98 roll rows require).
+ * Blink is not phased here (cells stay visible). Merged attr
+ * bytes use the host's format: color number in bits 7..5, bit 4
+ * = semi-graphic.
+ */
+#define TEXT_IMAGE 0xF3C8
+static unsigned short merged_codes[25 * 80];
+static unsigned char  merged_attrs[25 * 80];
+
+static int sjis_lead(int b) { return (b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xFC); }
+static int sjis_trail(int b) { return (b >= 0x40 && b <= 0x7E) || (b >= 0x80 && b <= 0xFC); }
+
+/* SJIS pair -> the interpreter's packed kanji code (JIS bytes),
+ * the same encoding screen.c's put_cell produces. */
+static void sjis_to_jis(int b1, int b2, int *j1, int *j2)
+{
+    int a = b1, c = b2;
+    if (a > 0x9F) a -= 0x40;
+    a = (a - 0x81) * 2 + 0x21;
+    if (c > 0x7F) c -= 1;
+    if (c >= 0x9E) { c -= 0x9E - 0x21; a += 1; }
+    else c -= 0x1F;
+    *j1 = a; *j2 = c;
+}
+
+static void merge_text(void)
+{
+    const unsigned short *tv = halp8_text_codes();
+    const unsigned char  *ta = halp8_text_attrs();
+    int run_color = 0xE0, run_graph = 0, run_secret = 0, run_reverse = 0;
+    int x, y, j;
+    for (y = 0; y < 25; y++) {
+        int base = TEXT_IMAGE + y * 120;
+        int slot[81];
+        int attr_rest = 0, governed = 0, strong = 0;
+        int row_active = 0;
+        for (j = 0; j <= 80; j++) slot[j] = 0;
+        for (j = 0; j < 120; j++) if (hal_peek(0, base + j)) row_active = 1;
+        for (j = 0; j < 20; j++) {
+            int column = hal_peek(0, base + 80 + j * 2);
+            int attr = hal_peek(0, base + 80 + j * 2 + 1);
+            if (j != 0 && column == 0) column = 0x80;
+            if (j == 0 && column == 0x80) column = 0;
+            if (column == 0x80 && !attr_rest) attr_rest = attr | 0x100;
+            else if (column <= 80 && !slot[column]) slot[column] = attr | 0x100;
+        }
+        if (!slot[0] && attr_rest) {    /* default holds until the */
+            for (j = 80; j; j--) {      /* first specified column */
+                if (slot[j]) { int t = slot[j]; slot[j] = attr_rest; attr_rest = t; }
+            }
+            slot[0] = attr_rest;
+        }
+        for (x = 0; x < 80; x++) {
+            int img = hal_peek(0, base + x);
+            unsigned short code;
+            unsigned char attr;
+            if (slot[x]) {
+                int a = slot[x] & 0xFF;
+                governed = 1;
+                if (a & 0x08) {         /* color command */
+                    run_color = a & 0xE0;
+                    run_graph = (a & 0x10) != 0;
+                    strong = (a & 0xE0) != 0;
+                } else {                /* decoration command: sets
+                                         * the decorations, keeps the
+                                         * color AND the graphic
+                                         * flag (CRTC color-attr
+                                         * mode) */
+                    run_secret = (a & 0x01) != 0;
+                    run_reverse = (a & 0x04) != 0;
+                    strong = run_reverse;
+                }
+            }
+            attr = (unsigned char)(run_color | (run_graph ? 0x10 : 0));
+            if (run_secret) {
+                merged_codes[y * 80 + x] = 0;
+                merged_attrs[y * 80 + x] = attr;
+            } else if (row_active && run_graph) {
+                /* semi-graphic row (staff roll): every byte is a
+                 * dot pattern, even 0x00 / 0x20 */
+                merged_codes[y * 80 + x] = (unsigned short)img;
+                merged_attrs[y * 80 + x] = attr;
+            } else if (img && img != 0x20) {
+                if (sjis_lead(img) && x + 1 < 80 &&
+                    sjis_trail(hal_peek(0, base + x + 1))) {
+                    int j1, j2;
+                    sjis_to_jis(img, hal_peek(0, base + x + 1), &j1, &j2);
+                    merged_codes[y * 80 + x] = (unsigned short)((j2 << 8) | (j1 - 0x20));
+                    merged_attrs[y * 80 + x] = attr;
+                    x++;
+                    merged_codes[y * 80 + x] = (unsigned short)((j2 << 8) | ((j1 - 0x20) | 0x80));
+                    merged_attrs[y * 80 + x] = attr;
+                } else {
+                    merged_codes[y * 80 + x] = (unsigned short)img;
+                    merged_attrs[y * 80 + x] = attr;
+                }
+            } else {
+                /* Interpreter cell. An image pair recolors it only
+                 * when it actually changes something (a marker's
+                 * color, graphic mode, reverse) - a pair that just
+                 * restates the cell's own color leaves the
+                 * interpreter's byte, decorations and all, alone. */
+                merged_codes[y * 80 + x] = tv[y * 80 + x];
+                merged_attrs[y * 80 + x] =
+                    (governed && strong &&
+                     (run_color != (ta[y * 80 + x] & 0xE0) ||
+                      run_graph || run_reverse))
+                        ? attr : ta[y * 80 + x];
+            }
+        }
+    }
+}
+
 const unsigned short *p8_text_codes(P8Engine *e)
 {
     static const unsigned short blank_codes[25 * 80];
     (void)e;
-    return halp8_text_visible() ? halp8_text_codes() : blank_codes;
+    if (!halp8_text_visible()) return blank_codes;
+    if (halp8_width40()) return halp8_text_codes();
+    merge_text();
+    return merged_codes;
 }
 const unsigned char  *p8_text_attrs(P8Engine *e)
 {
     static const unsigned char blank_attrs[25 * 80];
     (void)e;
-    return halp8_text_visible() ? halp8_text_attrs() : blank_attrs;
+    if (!halp8_text_visible()) return blank_attrs;
+    if (halp8_width40()) return halp8_text_attrs();
+    merge_text();
+    return merged_attrs;
 }
 void p8_cursor(P8Engine *e, int *x, int *y, int *visible)
 {
