@@ -306,9 +306,36 @@ void berror(int code)
 }
 
 /* ---------------- line/data helpers ---------------- */
+/* ---------------- labels (*NAME) ---------------- */
+static int label_char(u8 c) { return isalnum(c) || c == '.'; }
+
+/* find the line whose first statement is "*name"; returns line number */
+static u16 find_label(const u8 *name, int len)
+{
+    u8 *l = prog_mem;
+    while (line_len(l)) {
+        u8 *p = l + 4;
+        while (*p == ' ') p++;
+        if (*p == '*') {
+            int j;
+            p++;
+            for (j = 0; j < len && p[j] == name[j]; j++) {}
+            if (j == len && !label_char(p[j])) return line_num(l);
+        }
+        l = line_next(l);
+    }
+    berror(E_UNDEF_LINE);
+    return 0;
+}
+
 static u16 get_linenum(void)
 {
     u16 n;
+    if (peekc() == '*' && isalpha(txtptr[1])) {
+        u8 *nm = ++txtptr;
+        while (label_char(*txtptr)) txtptr++;
+        return find_label(nm, (int)(txtptr - nm));
+    }
     if (peekc() == TK_LINENUM || peekc() == TK_INT) {
         txtptr++;
         n = (u16)(txtptr[0] | (txtptr[1] << 8));
@@ -322,7 +349,7 @@ static u16 get_linenum(void)
 static int has_linenum(void)
 {
     u8 c = peekc();
-    return c == TK_LINENUM || c == TK_INT;
+    return c == TK_LINENUM || c == TK_INT || (c == '*' && isalpha(txtptr[1]));
 }
 
 static void goto_line(u16 n)
@@ -1169,7 +1196,7 @@ static void stmt_renum(void)
             while (*p) {
                 if (*p == TK_LINENUM) {
                     u16 ref = (u16)(p[1] | (p[2] << 8));
-                    if (ref >= old) {
+                    if (ref >= old && ref != 0) {
                         /* find index of ref */
                         u8 *q = l; long n = nw; int found = 0;
                         while (line_len(q)) { if (line_num(q) == ref) { found = 1; break; } n += inc; q = line_next(q); }
@@ -1569,6 +1596,11 @@ static void stmt_option(void)
 static void exec_stmt(void)
 {
     u8 c = peekc();
+    if (c == '*') {                 /* label definition: nothing to execute */
+        txtptr++;
+        while (label_char(*txtptr)) txtptr++;
+        return;
+    }
     if (c < 0x80 || c == TK_FUNC) {
         if (isalpha(c)) { stmt_let(); end_of_stmt(); return; }
         if (c == TK_FUNC) syntax();

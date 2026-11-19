@@ -104,8 +104,18 @@ int tokenize(const char *src, u8 *dst, int dstmax)
     int o = 0, mark = 0;
     int expect_line = 0;   /* after GOTO/GOSUB/THEN/ELSE/RESTORE/RUN etc */
     int in_ident = 0;
+    int stmt_head = 1;     /* at the start of a statement (label definitions) */
     while (*s) {
         u8 c = *s;
+        int head = stmt_head;
+        if (c != ' ') stmt_head = (c == ':');
+        /* labels: "*NAME" at statement start, or as a jump target */
+        if (c == '*' && isalpha(s[1]) && (head || expect_line)) {
+            PUT('*'); s++;
+            while (isalnum(*s) || *s == '.') PUT(toupper(*s++));
+            in_ident = 0;
+            continue;
+        }
         if (c == '"') {
             PUT(*s++);
             while (*s && *s != '"') PUT(*s++);
