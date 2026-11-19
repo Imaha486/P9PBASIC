@@ -1,0 +1,5 @@
+10 GOTO *FOO
+20 END
+30 *FOO
+40 PRINT "oklab"
+50 END
