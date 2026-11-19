@@ -165,6 +165,40 @@ static int d88_read_sector_img(int img, int t, int r, unsigned char *dst)
     return 0;
 }
 
+/* write 256 bytes from src into sector r of subsystem track t of
+ * disk image `img`, in the in-memory image only: the file on disk
+ * is never modified, so a guest write behaves like a floppy in the
+ * drive for the session and every reader of the image (subsystem,
+ * file layer, XDE services) sees it. 0 on error. */
+static int d88_write_sector_img(int img, int t, int r, const unsigned char *src)
+{
+    int cyl, head, n, count;
+    unsigned long block;
+    long pos, base;
+    unsigned dsize, cp;
+    if (!d88_open()) return 0;
+    if (t < 0 || t >= 164) return 0;
+    base = d88_base(img);
+    cyl = t >> 1; head = t & 1;
+    block = d88_u32(base + 0x20 + (long)(cyl * 2 + head) * 4);
+    if (block == 0 || base + (long)block + 16 > d88_size) return 0;
+    pos = base + (long)block;
+    count = (int)d88_u16(pos + 4);   /* sectors in this track */
+    if (count <= 0 || count > 64) count = 64;
+    for (n = 0; n < count && pos + 16 <= d88_size; n++) {
+        dsize = d88_u16(pos + 0x0E);
+        if (dsize == 0) dsize = 128u << (d88[pos + 3] & 7);
+        if (d88[pos + 2] == r) {
+            cp = dsize < 256 ? dsize : 256;
+            if (pos + 16 + (long)cp > d88_size) return 0;
+            memcpy(d88 + pos + 16, src, cp);
+            return 1;
+        }
+        pos += 16 + (long)dsize;
+    }
+    return 0;
+}
+
 /* image 0 reader: the disk subsystem model and the file layer
  * address the boot disk only */
 static int d88_read_sector(int t, int r, unsigned char *dst)
@@ -189,6 +223,7 @@ static unsigned oq_head = 0, oq_count = 0;
 static unsigned char read_buf[16384];
 static unsigned read_len = 0;
 static int read_valid = 0;
+static unsigned char write_buf[16384];
 
 static int sub_cmd = -1;        /* current command, -1 = idle */
 static int sub_need = 0, sub_npar = 0;
@@ -224,12 +259,23 @@ static void subsys_read(void)
     read_valid = 1; sub_err = 0;
 }
 
+static void subsys_write(void)
+{
+    int nsec = sub_par[0], t = sub_par[2], r = sub_par[3], k;
+    sub_err = 0;
+    if (nsec > (int)(sizeof(write_buf) / 256)) { nsec = (int)(sizeof(write_buf) / 256); sub_err = 1; }
+    for (k = 0; k < nsec; k++) {
+        if (!d88_write_sector_img(0, t, r, write_buf + (unsigned)k * 256)) { sub_err = 1; return; }
+        if (++r > 16) { r = 1; t++; }
+    }
+}
+
 static void subsys_complete(void)
 {
     unsigned k;
     switch (sub_cmd) {
     case 0x00: sub_err = 0; break;
-    case 0x01: sub_err = 0; break;                 /* write: data discarded */
+    case 0x01: subsys_write(); break;
     case 0x02: subsys_read(); break;
     case 0x03: case 0x12:
         for (k = 0; k < read_len; k++) oq_push(read_buf[k]);
@@ -248,6 +294,7 @@ static void subsys_complete(void)
         fprintf(stderr, "SUBSYS cmd %02X", sub_cmd);
         for (i = 0; i < sub_need; i++) fprintf(stderr, " %02X", sub_par[i]);
         if (sub_cmd == 0x02) fprintf(stderr, " -> %s len %u", read_valid ? "ok" : "error", read_len);
+        if (sub_cmd == 0x01) fprintf(stderr, " -> %s", sub_err ? "error" : "ok");
         fprintf(stderr, " (out queue %u)\n", oq_count);
     }
     sub_cmd = -1;
@@ -282,7 +329,12 @@ static void subsys_data(int b)
         }
         return;
     }
-    if (sub_wleft > 0 && --sub_wleft == 0) subsys_complete();
+    if (sub_wleft > 0) {
+        long idx = (long)sub_par[0] * 256 - sub_wleft;
+        if (idx >= 0 && idx < (long)sizeof(write_buf))
+            write_buf[idx] = (unsigned char)b;
+        if (--sub_wleft == 0) subsys_complete();
+    }
 }
 
 /* ================= I/O ports ================= */
