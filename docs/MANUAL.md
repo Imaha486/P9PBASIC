@@ -78,6 +78,17 @@ N88-BASIC と同じく、**画面上の好きな行にカーソルを合わせ�
 `LIST` `NEW` `AUTO` `RENUM` `DELETE` `EDIT` `TRON` `TROFF` `CLEAR` `SYSTEM`
 `LOAD` `SAVE` `MERGE` `CHAIN` `REM` `'`
 
+**ラベル**：行の先頭に `*名前` と書くと、その行をラベルで指定できます。
+`GOTO` `GOSUB` `THEN` `ELSE` `ON〜GOTO/GOSUB` `ON ERROR GOTO` `ON KEY GOSUB` `RESTORE` `RESUME` `RETURN` で、行番号の代わりに使えます。
+名前には英字・数字・ピリオドが使え、大文字と小文字は区別しません。
+```
+10 GOSUB *INIT
+20 *MAIN '--- メインループ
+30 IF INKEY$="" THEN GOTO *MAIN ELSE END
+100 *INIT:CLS:RETURN
+```
+ラベルが見つからないときは「その行番号はありません」（エラー番号 8）になります。`RENUM` してもラベルはそのまま使えます。
+
 ### 変数・データ
 `LET` `DIM` `ERASE` `SWAP` `READ` `DATA` `RESTORE [行]` `DEF FN` `DEFINT/DEFSNG/DEFDBL/DEFSTR`
 `OPTION BASE` `RANDOMIZE` `MID$(A$,n,m)=` `LSET` `RSET` `TIME$=` `DATE$=`
