@@ -688,6 +688,54 @@ static int trap(void)
         emu_ret();
         return 1;
     }
+    if (pc == 0x11D3) {     /* ROM: evaluate the argument at HL and
+                             * leave the result in the (0xEC41) value
+                             * cell. For a number that cell holds the
+                             * value itself; for a string it holds a
+                             * POINTER to the 3-byte descriptor
+                             * [len][addr lo][addr hi] — the N88-BASIC
+                             * convention NEOMSC's FFDE service-3 draw
+                             * path relies on when it dereferences
+                             * (0xEC41) after this call. The relay's
+                             * synthetic stream carries strings as
+                             * quoted literals, so the descriptor can
+                             * point straight at the literal's bytes.
+                             * (Without this, service 3 drew whatever
+                             * the stale numeric descriptor pointed at:
+                             * a fixed, text-independent pattern.) */
+        unsigned p = (unsigned)cpu.h << 8 | cpu.l;
+        int b;
+        while (hal_peek(0, p) == 0x20) p++;
+        b = hal_peek(0, p);
+        if (b == 0x22) {
+            unsigned start = ++p, len;
+            while (hal_peek(0, p) != 0x22 && hal_peek(0, p) != 0) p++;
+            len = p - start;
+            if (len > 255) len = 255;
+            hal_poke(0, 0xEC50, (int)len);
+            hal_poke(0, 0xEC51, (int)(start & 0xFF));
+            hal_poke(0, 0xEC52, (int)((start >> 8) & 0xFF));
+            hal_poke(0, 0xEC41, 0x50);
+            hal_poke(0, 0xEC42, 0xEC);
+            if (hal_peek(0, p) == 0x22) p++;
+            cpu.h = (uint8_t)(p >> 8); cpu.l = (uint8_t)p;
+        } else if ((b >= 0x11 && b <= 0x1A) || (b >= '0' && b <= '9')
+                   || b == 0x0F || b == 0x1C || b == 0x0C || b == 0x0B
+                   || b == 0x2D) {
+            long v = stream_number(&p);
+            vessel_prime_arg(v);
+            cpu.h = (uint8_t)(p >> 8); cpu.l = (uint8_t)p;
+        }
+        /* Any other byte (the ',' separator or the stream
+         * terminator) means the RST 8 resync has already evaluated
+         * this argument and the evaluator is being asked for the
+         * current value: leave (0xEC41) and HL exactly as they are.
+         * Clobbering the cell here breaks NEOMSC's sub-function
+         * dispatch, whose fetch (0x9F84) calls this evaluator with
+         * HL sitting on the separator. */
+        emu_ret();
+        return 1;
+    }
     if (pc == 0xA794) {     /* NEOMSC's argument fetch: the in-image
                              * routine here chains into ROM evaluators
                              * (0x11D3 / 0x1B9D) that the vessel cannot run,

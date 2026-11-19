@@ -62,16 +62,20 @@ printf '%s\n' "$out" | grep -q 'waited' || bad "PROBE42: playback wait loop brok
 out=$(run_probe PROBE44) || bad "PROBE44 exit"
 printf '%s\n' "$out" | grep -q 'ok44' || bad "PROBE44: CG load/draw path broken"
 # PROBE53: the FFDE service-3 staff roll renders into the guest text
-# image at 0xF3C8 (never the graphic planes -- on hardware the image
-# IS the text VRAM). Without the service-3 calls the image stays all
-# zero (control-verified), so a large nonzero count proves the
-# genuine handler ran and drew. Displaying that image in the embed
-# engine is a separate known gap: docs/APPROXIMATIONS.md.
+# image at 0xF3C8 as semi-graphic bitmap codes (font at 0xCA00,
+# 8 bytes per character; the scroll shifts the dot plane). With the
+# probe's fixed staff data the image ends with exactly 384 nonzero
+# bytes. Control runs: no service-3 calls -> all zero; different
+# staff text -> a different image (348). Before the ROM string
+# evaluator (0x11D3) was emulated, the draw path read a stale
+# numeric descriptor and produced a fixed 1728-byte pattern
+# regardless of the text. Displaying the guest text image in the
+# embed engine is a separate known gap: docs/APPROXIMATIONS.md.
 out=$(run_probe PROBE53) || bad "PROBE53 exit"
 printf '%s\n' "$out" | grep -q 'rolldone' || bad "PROBE53: staff roll did not complete"
 img=$(printf '%s\n' "$out" | grep -o 'img *[0-9]*' | grep -o '[0-9]*$')
-if [ -z "$img" ] || [ "$img" -lt 1000 ]; then
-  bad "PROBE53: text image count ${img:-none} < 1000 (staff roll did not render)"
+if [ "$img" != "384" ]; then
+  bad "PROBE53: text image count ${img:-none} != 384 (staff roll render changed)"
 fi
 [ $FAIL -eq 0 ] && echo "Tier A ok"
 
