@@ -25,7 +25,7 @@ note "build"
 # they link the embed objects minus every test main.
 EMBED_OBJS=$(ls build-embed/*.o | grep -v embed_test \
              | grep -v textmerge_test | grep -v window_test \
-             | grep -v subsys_test)
+             | grep -v subsys_test | grep -v dramload_test)
 unit_test() { # name [args...]
   _t=$1; shift
   cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c "tools/$_t.c" \
@@ -57,6 +57,11 @@ cp tests/probes/*.BAS "$WORK/"
 # writes land in the in-memory image only; the file stays untouched.
 unit_test subsys_test "$DISK"
 echo "subsys ok"
+
+# ---- FFDE service 1 (vessel_dram_load) must fill the OPNA's
+# ADPCM-B DRAM with the disk's sectors and leave ADPCM-A untouched.
+# (No unconditional "ok" echo: unit_test records failures itself.)
+unit_test dramload_test "$DISK"
 
 run_probe() { # name [env assignments...]
   _n=$1; shift

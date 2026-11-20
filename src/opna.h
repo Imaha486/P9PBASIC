@@ -15,9 +15,20 @@ extern "C" {
 
 void opna_write(int bank, int addr, int value);
 void opna_advance(long cpu_cycles);
-/* Write one byte into the OPNA's ADPCM-A external memory (the Sound
- * Board II's writable sample RAM that FFDE service 1 loads into). */
+/* Write / read one byte of the OPNA's ADPCM-B sample DRAM (256 KiB,
+ * the Sound Board II's only writable sample memory). FFDE service 1
+ * loads the PCM data block here and PMD's PCM part plays it back
+ * through the bank-1 ADPCM-B registers. The read is for tests and
+ * diagnostics; out-of-range addresses are ignored / read as 0. */
+void opna_adpcm_b_write(unsigned long addr, int value);
+int  opna_adpcm_b_read(unsigned long addr);
+/* Write / read one byte of the ADPCM-A (rhythm) memory. On the
+ * YM2608 this is a ROM inside the chip, not loadable by the guest;
+ * nothing calls the write today. It is kept as the entry point for
+ * a future host-side rhythm ROM supply (until then the rhythm
+ * channels read zeros). */
 void opna_adpcm_a_write(unsigned long addr, int value);
+int  opna_adpcm_a_read(unsigned long addr);
 
 /* Embedded use: receive rendered stereo frames (interleaved s16) as
  * they are produced; passing NULL removes the sink. Rendering runs

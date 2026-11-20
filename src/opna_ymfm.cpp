@@ -28,8 +28,14 @@ unsigned long g_ext_reads_b = 0, g_ext_writes_b = 0;   /* diagnostics */
 unsigned long g_ext_reads_a = 0;
 
 struct Iface : ymfm::ymfm_interface {
+    /* ADPCM-B: the SB2's 256 KiB sample DRAM (guest-writable; FFDE
+     * service 1 and bank-1 register writes fill it). ADPCM-A: the
+     * chip's rhythm ROM image - read-only to the guest, all zeros
+     * until a host-side supply fills it through
+     * opna_adpcm_a_write. ymfm's YM2608 only reads its fixed rhythm
+     * layout at the start of this buffer. */
     std::vector<uint8_t> adpcm_b_ram;
-    std::vector<uint8_t> adpcm_a_ram;   /* SB2's writable ADPCM-A memory */
+    std::vector<uint8_t> adpcm_a_ram;
     Iface() : adpcm_b_ram(256 * 1024, 0), adpcm_a_ram(1024 * 1024, 0) {}
     uint8_t ymfm_external_read(ymfm::access_class type, uint32_t offset) override
     {
@@ -182,10 +188,29 @@ void push_frame(void)
 
 } // namespace
 
+extern "C" void opna_adpcm_b_write(unsigned long addr, int value)
+{
+    if (addr < iface.adpcm_b_ram.size())
+        iface.adpcm_b_ram[(size_t)addr] = (uint8_t)value;
+}
+
+extern "C" int opna_adpcm_b_read(unsigned long addr)
+{
+    return addr < iface.adpcm_b_ram.size() ? iface.adpcm_b_ram[(size_t)addr] : 0;
+}
+
+/* Not called today: the ADPCM-A memory is the chip's rhythm ROM,
+ * which no guest path can write. Kept for a future host-side
+ * rhythm ROM supply. */
 extern "C" void opna_adpcm_a_write(unsigned long addr, int value)
 {
     if (addr < iface.adpcm_a_ram.size())
         iface.adpcm_a_ram[(size_t)addr] = (uint8_t)value;
+}
+
+extern "C" int opna_adpcm_a_read(unsigned long addr)
+{
+    return addr < iface.adpcm_a_ram.size() ? iface.adpcm_a_ram[(size_t)addr] : 0;
 }
 
 extern "C" void opna_set_sink(opna_sink_fn fn, void *ctx)

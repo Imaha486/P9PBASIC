@@ -1168,25 +1168,30 @@ static void vessel_burn(long cycles)
 
 /* FFDE service 1 equivalent: bulk-load `tracks` logical tracks
  * starting at logical track `ltrack` from disk image `img` of the
- * P8P_DISK file into the OPNA's ADPCM-A sample RAM (the Sound
- * Board II DRAM that PMD's PCM driver plays from), starting at
- * DRAM offset 0. Returns the number of sectors loaded. */
+ * P8P_DISK file into the OPNA's ADPCM-B sample DRAM (the Sound
+ * Board II's 256 KiB DRAM that PMD's PCM part plays from through
+ * the bank-1 ADPCM-B registers: control 00H, delta-N pitch),
+ * starting at DRAM offset 0. The ADPCM-A side is the chip's rhythm
+ * ROM and is not a load target. Returns the number of sectors
+ * stored in DRAM: a load past the 256 KiB capacity is still read
+ * and timed like the genuine burst, but the excess is dropped. */
 int vessel_dram_load(int img, int ltrack, int tracks)
 {
     unsigned char buf[256];
-    int n = 0, t, r, b;
+    int n = 0, stored = 0, t, r, b;
     unsigned long dst = 0;
     for (t = ltrack; t < ltrack + tracks; t++) {
         for (r = 1; r <= 16; r++) {
-            if (!d88_read_sector_img(img, t, r, buf)) return n;
-            for (b = 0; b < 256; b++) opna_adpcm_a_write(dst++, buf[b]);
+            if (!d88_read_sector_img(img, t, r, buf)) return stored;
+            if (dst < 256UL * 1024) stored++;
+            for (b = 0; b < 256; b++) opna_adpcm_b_write(dst++, buf[b]);
             n++;
             vessel_burn(XDE_SECTOR_CYCLES);
         }
     }
     if (tracing()) fprintf(stderr, "VESSEL dram_load ltrack %d tracks %d (%d sectors)\n",
                            ltrack, tracks, n);
-    return n;
+    return stored;
 }
 
 /* FFDE service 0 equivalent: read count 256-byte sectors starting at
