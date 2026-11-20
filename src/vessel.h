@@ -15,6 +15,8 @@ long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned 
 long vessel_call_pushed(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de, unsigned pushed); /* call with preset registers */
 int  vessel_d88_sector(int t, int r, unsigned char *dst); /* raw D88 sector (t = cyl*2+head) */
 const unsigned char *vessel_vram_plane(int bank); /* graphics VRAM planes 0=B,1=R,2=G; 80x200 bytes each */
+void vessel_palette(int idx, int *r, int *g, int *b); /* palette registers 0..7, out 0..255 */
+void vessel_set_palette(int idx, int r7, int g7, int b7); /* components 0..7 */
 int  vessel_disk_read(int img, int ltrack, int sector, int count, unsigned addr);
 int  vessel_dram_load(int img, int ltrack, int tracks); /* FFDE services 0/1: raw sector reads from P8P_DISK (img = bundled disk image index) */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */

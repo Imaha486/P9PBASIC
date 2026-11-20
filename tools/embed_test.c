@@ -194,6 +194,26 @@ int main(int argc, char **argv)
             if (f) { fwrite(vessel_vram_plane(b), 1, 0x4000, f); fclose(f); }
         }
     }
+    if (getenv("P8P_DUMPRAM")) {
+        int i;
+        printf("RAM2000:");
+        for (i = 0; i < 16; i++) printf(" %02X", hal_peek(0, 0x2000 + i));
+        printf("\nPTRS: %d %d\n",
+               hal_peek(0, 0xA543) + 256 * hal_peek(0, 0xA544),
+               hal_peek(0, 0xA545) + 256 * hal_peek(0, 0xA546));
+    }
+    if (getenv("P8P_DUMPIMG")) {
+        int x, y;
+        printf("----- GUEST IMAGE -----\n");
+        for (y = 0; y < 25; y++) {
+            printf("%02d|", y);
+            for (x = 0; x < 80; x++) {
+                int b = hal_peek(0, 0xF3C8 + y * 120 + x);
+                putchar((b >= 0x20 && b < 0x7F) ? b : '.');
+            }
+            printf("\n");
+        }
+    }
     dump_text(e);
     dump_attrs(e);
     dump_mattrs(e);

@@ -354,6 +354,39 @@ static int latched = 0;
 static int sub_dac = 0;         /* subsystem DAC status */
 static unsigned char misc_port[256];
 
+/* Graphics palette registers (ports 0x54-0x5B), 3 bits per component.
+ * One register set shared by direct OUT writes from machine code and
+ * by the interpreter's PALETTE statement (via hal_palette's mirror in
+ * halp8.c), as on hardware. Reset state is the digital palette. */
+static unsigned char vram_pal[8][3];    /* [i] = {r, g, b}, 0..7 */
+
+void vessel_palette(int idx, int *r, int *g, int *b)
+{
+    if (idx < 0) idx = 0;
+    if (idx > 7) idx = 7;
+    *r = vram_pal[idx][0] * 255 / 7;
+    *g = vram_pal[idx][1] * 255 / 7;
+    *b = vram_pal[idx][2] * 255 / 7;
+}
+
+void vessel_set_palette(int idx, int r7, int g7, int b7)
+{
+    if (idx < 0 || idx > 7) return;
+    vram_pal[idx][0] = (unsigned char)r7;
+    vram_pal[idx][1] = (unsigned char)g7;
+    vram_pal[idx][2] = (unsigned char)b7;
+}
+
+static void palette_reset(void)
+{
+    int i;
+    for (i = 0; i < 8; i++) {
+        vram_pal[i][0] = (i & 2) ? 7 : 0;
+        vram_pal[i][1] = (i & 4) ? 7 : 0;
+        vram_pal[i][2] = (i & 1) ? 7 : 0;
+    }
+}
+
 /* RAM window at 8000-83FF (I/O 70H) and 64K-RAM mode (I/O 31H).
  * The window normally shows the 1K page of main RAM whose base
  * OUT 70H sets (base = value << 8; IN 70H reads it back). With
@@ -585,6 +618,24 @@ void vessel_port_out(int port, int v)
     case 0xEC: kanji_addr[1] = (unsigned short)((kanji_addr[1] & 0xFF00) | (v & 0xFF)); break;
     case 0xED: kanji_addr[1] = (unsigned short)((kanji_addr[1] & 0x00FF) | ((v & 0xFF) << 8)); break;
     case 0xEA: case 0xEB: break;   /* accepted, ignored (QUASI88 parity) */
+    case 0x54: case 0x55: case 0x56: case 0x57:
+    case 0x58: case 0x59: case 0x5A: case 0x5B: {
+        /* Palette registers (QUASI88 pc88main.cpp): digital mode packs
+         * one bit per component; analog mode takes two writes - with
+         * bit 6 clear, blue = bits 0-2 and red = bits 3-5; with bit 6
+         * set, green = bits 0-2. The other components are kept. */
+        int i = port - 0x54;
+        if (!(misc_port[0x32] & 0x20)) {
+            vram_pal[i][2] = (v & 1) ? 7 : 0;
+            vram_pal[i][0] = (v & 2) ? 7 : 0;
+            vram_pal[i][1] = (v & 4) ? 7 : 0;
+        } else if (!(v & 0x40)) {
+            vram_pal[i][2] = v & 7;
+            vram_pal[i][0] = (v >> 3) & 7;
+        } else {
+            vram_pal[i][1] = v & 7;
+        }
+        break; }
     case 0x5C: mem_bank = 0; break;     /* VRAM plane B */
     case 0x5D: mem_bank = 1; break;     /* VRAM plane R */
     case 0x5E: mem_bank = 2; break;     /* VRAM plane G */
@@ -965,7 +1016,12 @@ void vessel_init(void)
     memset(gvram, 0, sizeof(gvram));
     mem_bank = 3;
     misc_port[0x34] = 0x77;             /* QUASI88 reset value */
-    misc_port[0x32] = 0;
+    /* The genuine ROM leaves the analog-palette bit (0x32 bit 5) set
+     * for the analog-display V2 environment; guest code preserves it
+     * through read-modify-write port access, and the palette ports'
+     * analog write protocol depends on it (QUASI88 pc88main.cpp). */
+    misc_port[0x32] = 0x20;
+    palette_reset();
     misc_port[0x35] = 0;
     misc_port[0x31] = 0;
     window_base = 0x8000;               /* identity, as booted BASIC leaves it */

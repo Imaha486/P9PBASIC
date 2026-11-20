@@ -232,7 +232,8 @@ void p8_frame(P8Engine *e, unsigned char *rgba)
                        | (((vp[2][off] >> bit) & 1) << 2);
                 if (vi) idx = vi;
             }
-            halp8_palette(idx, &r, &gg, &b);
+            if (idx < 8) vessel_palette(idx, &r, &gg, &b);
+            else halp8_palette(idx, &r, &gg, &b);
             p[0] = (unsigned char)r;
             p[1] = (unsigned char)gg;
             p[2] = (unsigned char)b;

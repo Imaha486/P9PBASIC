@@ -130,12 +130,14 @@ void stmt_screen(void)
     hal_gpage(ap, (dp & 1) ? 0 : (dp & 2) ? 1 : 0);
     if (sw >= 0) {
         /* PC-88 SCREEN display switch: 0 = graphics only,
-         * 1 = text only, 2 = text + graphics overlaid.
-         * (P9PBASIC's PC-98 rule, graphics on iff sw == 0, left
-         * the text plane permanently visible, so MA2026's
-         * attract mode showed the song list that the real
-         * machine hides until *SELECT.) */
-        g_on = (sw != 1);
+         * 1 = text + graphics overlaid, 2 = text only.
+         * (Verified against MA2026 on QUASI88: the attract
+         * under SCREEN 0,0 shows the CG with the *TITLE panel
+         * plotted in GVRAM and the text screen's song list
+         * hidden, while *SELECT under SCREEN 0,2 shows the
+         * list alone on black. An earlier mapping had sw=2
+         * overlaid, leaving the CG visible under the list.) */
+        g_on = (sw != 2);
         hal_ton(sw != 0);
     }
     hal_gon(g_on && dp != 0);

@@ -167,6 +167,12 @@ void hal_palette(int i, int g, int r, int b)
         pal_init = 1;
     }
     if (i >= 0 && i < 16) { pal[i][0] = r; pal[i][1] = g; pal[i][2] = b; }
+    /* The interpreter's PALETTE statement programs the same hardware
+     * palette registers that machine code writes via ports 0x54-0x5B;
+     * mirror entries 0..7 (4-bit values scaled to the registers'
+     * 3 bits) so both writers share one set, as on hardware. */
+    if (i >= 0 && i < 8)
+        vessel_set_palette(i, (r * 7 + 7) / 15, (g * 7 + 7) / 15, (b * 7 + 7) / 15);
 }
 void hal_analog(int on) { (void)on; }
 
