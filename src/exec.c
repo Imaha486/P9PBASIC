@@ -1371,7 +1371,8 @@ static unsigned ext_put_num(unsigned p, long v)
 static unsigned ext_build_stream(int sub, const long *nums,
                                  const int *arg_is_str,
                                  const char (*arg_str)[128],
-                                 const int *arg_slen, int narg)
+                                 const int *arg_slen, int narg,
+                                 const int *arg_sep)
 {
     unsigned p = EXT_STREAM;
     int i;
@@ -1379,7 +1380,13 @@ static unsigned ext_build_stream(int sub, const long *nums,
     p = ext_put(p, sub);
     p = ext_put(p, 0x20);
     for (i = 0; i < narg; i++) {
-        if (i) p = ext_put(p, 0x2C);
+        /* Preserve the source separator: NEOMSC's FFDD handler
+         * dispatches on it -- ',' continues with a direct argument
+         * (0x9F65), ';' introduces a data reference (song, type)
+         * resolved through its song table. Flattening ';' to ','
+         * sent data references down the direct path, where the song
+         * index was misread as a string pointer and nothing plotted. */
+        if (i) p = ext_put(p, arg_sep ? (unsigned)arg_sep[i] : 0x2C);
         if (arg_is_str[i]) {
             int j;
             p = ext_put(p, 0x22);
@@ -1399,6 +1406,8 @@ static void stmt_ext(int which)
     static const char *nm[3] = { "XDD", "XDE", "XDF" };
     char cmd[16];
     long nums[16];
+    int arg_sep[16];
+    int pending_sep = 0x2C;
     int arg_is_str[16];
     static char arg_str[16][128];
     int arg_slen[16];
@@ -1423,6 +1432,7 @@ static void stmt_ext(int which)
         VAL v;
         if (at_stmt_end()) break;
         eval(&v);
+        if (nnum < 16) arg_sep[nnum] = pending_sep;
         if (nnum < 16) {
             if (v.type == T_STR) {
                 int L = (int)v.u.s.len;
@@ -1445,7 +1455,8 @@ static void stmt_ext(int which)
             else
                 fprintf(stderr, " %g", val_to_dbl(&v));
         }
-        if (accept(',') || accept(';')) continue;
+        if (accept(',')) { pending_sep = 0x2C; continue; }
+        if (accept(';')) { pending_sep = 0x3B; continue; }
         break;
     }
     if (tr) fputc('\n', stderr);
@@ -1456,7 +1467,7 @@ static void stmt_ext(int which)
          * argument token, A = that token's byte — the convention the
          * genuine interpreter uses, verified against QUASI88). */
         unsigned hl = ext_build_stream(0xDD, nums, arg_is_str,
-                                       arg_str, arg_slen, nnum);
+                                       arg_str, arg_slen, nnum, arg_sep);
         vessel_prime_arg(nums[0]);
         vessel_call(0x9E5C, (unsigned)hal_peek(0, hl), hl, 0xEEA1, 0);
     } else if (which == 2 && cmd[0] && hal_peek(0, 0xA6DB) == 0x7E) {
@@ -1493,7 +1504,7 @@ static void stmt_ext(int which)
              * relay to NEOMSC's FFDE handler (the EEA4 vector's
              * target, 0x994D; same entry convention as XDD). */
             unsigned hl = ext_build_stream(0xDE, nums, arg_is_str,
-                                           arg_str, arg_slen, nnum);
+                                           arg_str, arg_slen, nnum, arg_sep);
             vessel_prime_arg(nums[0]);
             vessel_call(0x994D, (unsigned)hal_peek(0, hl), hl, 0xEEA4, 0);
         }

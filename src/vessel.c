@@ -785,6 +785,23 @@ static int trap(void)
 {
     unsigned pc = cpu.pc, ret;
     if (pc == SENTINEL) return -1;
+    if (pc == 0x0010) {     /* RST 0x10: ROM CHRGET -- A = (HL), HL
+                             * advanced past it and any spaces. NEOMSC's
+                             * FFDD handler calls it on the ';' of a data
+                             * reference (XDD fn,..,x,y;song,type) to step
+                             * HL onto the song expression before fetching
+                             * it with the usual evaluator calls. */
+        unsigned hl = ((unsigned)cpu.h << 8) | cpu.l;
+        unsigned char ch;
+        do { ch = hal_peek(0, hl++); } while (ch == ' ');
+        cpu.a = ch;
+        cpu.h = (unsigned char)(hl >> 8);
+        cpu.l = (unsigned char)hl;
+        cpu.zf = (ch == 0 || ch == ':');
+        cpu.cf = (ch >= '0' && ch <= '9');
+        emu_ret();
+        return 1;
+    }
     if (pc == 0x0008) {     /* RST 8: inline service byte follows the RST */
         ret = rd16(cpu.sp);
         if (tracing()) { fprintf(stderr, "VESSEL RST8 svc %02X at %04X", hal_peek(0, ret), ret); trace_regs(); }
