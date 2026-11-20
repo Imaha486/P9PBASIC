@@ -8,7 +8,7 @@
 #include <setjmp.h>
 #include "hal.h"
 
-#define VERSION_STR "P9PBASIC Version 1.00"
+#define VERSION_STR "P9PBASIC ver 261120"
 
 typedef short i16;
 typedef unsigned short u16;

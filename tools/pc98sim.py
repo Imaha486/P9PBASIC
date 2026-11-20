@@ -20,6 +20,7 @@ ap.add_argument('--chunks', type=int, default=4000)
 ap.add_argument('--trace-int', action='store_true')
 ap.add_argument('--cwd', default='.')
 ap.add_argument('--idle', type=int, default=300)
+ap.add_argument('--ime', action='append', default=[], help='text put into the BIOS key buffer at each \\I')
 ap.add_argument('--attr', default=None)
 opt = ap.parse_args()
 
@@ -323,6 +324,7 @@ def script_to_events(s):
                 k = 0x62 + (int(n) - 1 if n != '0' else 9); ev += [k, k | 0x80]
             elif n == 'w': ev += ['wait']
             elif n == 'S': ev += ['shift']
+            elif n == 'I': ev += ['ime']
             elif n == 'P': ev += [0x34]
             elif n == 'p': ev += [0xB4]
             continue
@@ -374,6 +376,17 @@ while not exited[0] and chunk < opt.chunks:
     if events and not kbd_ready and not (pic_mask & 0x02):
         e = events.pop(0)
         if e == 'wait': wait_chunks = 30; continue
+        if e == 'ime':
+            data = opt.ime.pop(0).encode('shift_jis') if opt.ime else b''
+            for b in data:
+                head, tail, cnt = struct.unpack('<HHB', mu.mem_read(0x524, 5))
+                if cnt >= 16: break
+                mu.mem_write(tail, bytes([b, 0]))
+                tail += 2
+                if tail >= 0x522: tail = 0x502
+                mu.mem_write(0x526, struct.pack('<H', tail)); mu.mem_write(0x528, bytes([cnt + 1]))
+            wait_chunks = 5
+            continue
         if e == 'shift': continue
         if e == 0xF0: e = 0xF0   # shift release
         kbd_data = e

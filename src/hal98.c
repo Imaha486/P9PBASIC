@@ -238,6 +238,7 @@ void hal_width40(int on)
     outp(0x68, on ? 0x05 : 0x04);
 }
 
+static void bios_kbuf_clear(void);
 /* ---------------- init / term ---------------- */
 void hal_init(int flags)
 {
@@ -247,6 +248,7 @@ void hal_init(int flags)
         unsigned i;
         for (i = 0; i < sizeof(ematmap) / sizeof(ematmap[0]); i++) emat_index[ematmap[i][0]] = (unsigned char)(i + 1);
     }
+    bios_kbuf_clear();
     old09 = _dos_getvect(0x09);
     old0a = _dos_getvect(0x0A);
     _disable();
@@ -291,9 +293,41 @@ void hal_term(void)
 }
 
 /* ---------------- keyboard API ---------------- */
+/* Japanese input from the emulator's IME is placed in the BIOS key buffer
+ * (0000:0502h-0521h, 16 entries of 2 bytes; 0524h head, 0526h tail, 0528h count).
+ * Low byte = character code (Shift_JIS byte), high byte = 0. */
+#define BKB_HEAD  (*(unsigned short __far *)MK_FP(0, 0x524))
+#define BKB_TAIL  (*(unsigned short __far *)MK_FP(0, 0x526))
+#define BKB_COUNT (*(unsigned char __far *)MK_FP(0, 0x528))
+
+static void bios_kbuf_clear(void)
+{
+    _disable();
+    BKB_HEAD = 0x502; BKB_TAIL = 0x502; BKB_COUNT = 0;
+    _enable();
+}
+
+static int bios_kbuf_get(void)
+{
+    int c = -1;
+    _disable();
+    if (BKB_COUNT != 0) {
+        unsigned h = BKB_HEAD;
+        if (h < 0x502 || h > 0x520 || (h & 1)) h = 0x502;   /* guard against a broken pointer */
+        c = *(unsigned char __far *)MK_FP(0, h);
+        h += 2;
+        if (h >= 0x522) h = 0x502;
+        BKB_HEAD = (unsigned short)h;
+        BKB_COUNT = (unsigned char)(BKB_COUNT - 1);
+    }
+    _enable();
+    return c;
+}
+
 int hal_getkey(void)
 {
-    int c;
+    int c = bios_kbuf_get();          /* IME text first: it was typed before later keys */
+    if (c >= 0) return c;
     if (khead == ktail) return -1;
     _disable();
     c = kbuf[ktail];
@@ -302,7 +336,7 @@ int hal_getkey(void)
     return c;
 }
 
-int hal_keyhit(void) { return khead != ktail; }
+int hal_keyhit(void) { return khead != ktail || BKB_COUNT != 0; }
 int hal_breakflag(void) { int b = brk; brk = 0; return b; }
 unsigned char hal_lastscan(void) { return lastscan; }
 unsigned char hal_keymatrix(int idx) { return kmat[idx & 15]; }

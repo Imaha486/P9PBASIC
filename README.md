@@ -19,9 +19,10 @@ PC-9801 シリーズの MS-DOS 上で動く、**N88日本語BASIC(86) 互換の 
 - 640×400・16 色のグラフィック命令（LINE / CIRCLE / PAINT / GET@ / PUT@ など）
 - シーケンシャルファイル、BSAVE / BLOAD、`MKS$` / `CVS` などの MBF 形式に対応
 - Shift_JIS の漢字表示（テキスト VRAM に JIS コードで書き込み）
+- PC98PLAYER の日本語入力（IME で確定した文字を BIOS キーバッファ経由で受け取る）に対応
 
 ## 動作環境
-- PC-9801 シリーズ（8086 / V30 以降）、または PC-98 エミュレータ（[PC98PLAYER](https://github.com/Imaha486/PC98PLAYER) など）
+- PC-9801 シリーズ（8086 / V30 以降）、または PC-98 エミュレータ（PC98PLAYER など）
 - MS-DOS 3.x 以降
 - 16 色表示にはアナログパレット（PC-9801VM 以降の 16 色対応機）が必要です
 
@@ -53,6 +54,7 @@ P9PBASIC GAME /G         80h〜9Fh・E0h〜FFh を半角グラフィック文字
 | `docs/MANUAL.md` | マニュアル |
 | `tools/pc98sim.py` | 開発用の PC-98＋MS-DOS 最小試験台（Python、unicorn を使用） |
 | `build.bat` / `build.sh` | ビルド用スクリプト |
+| `CHANGELOG.md` | 更新履歴 |
 
 ## ライセンス
 MIT License（[LICENSE](LICENSE)）。
