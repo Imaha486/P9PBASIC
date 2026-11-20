@@ -26,10 +26,17 @@ hardware-behaviour description. For a JIS code (J1<<8)|J2:
   glyph index = addr >> 4; each glyph is 16 rows x 2 bytes [left, right],
   matching the port protocol (IN E9 = byte[0] = left, IN E8 = byte[1]).
 
-Single-byte characters (JIS X 0201: ASCII + halfwidth kana) live in
-bank 0 at index = code; the guest reads only rows 0-7 for them, so the
-8x16 source glyphs are vertically packed (OR of row pairs) into rows
-0-7 of the left byte; the right byte stays 0.
+Single-byte characters (JIS X 0201: ASCII + halfwidth kana) are laid
+out FLAT, as in the genuine ROM: glyph for code C occupies 16
+consecutive stream bytes at offset C*16 (the byte stream is
+p8_kanji_glyph flattened in [idx][row*2+half] order). The guest
+fetches them through the kanji ports at addr = C*8, reading
+(E9,E8) pairs — i.e. stream bytes (C*8 + r)*2 + {0,1} for r = 0..7,
+which is exactly the glyph's 16 rows in order. (QUASI88's own status
+renderer reads ANK glyphs the same way: &kanji_rom[0][c * 8][0],
+advancing one stream byte per row, 16 rows.) An earlier layout that
+placed ANK glyphs at index = code rendered XDD-plotted ASCII text
+(e.g. MA2026's "Presented by MEGAFEPPS,2026") as mojibake.
 
 Usage: gen_kanjifont.py <shnmk16.bdf> <shnm8x16r.bdf> <out.c>
 """
@@ -99,14 +106,19 @@ def main():
 
     half = parse_bdf(half_bdf)
     placed_half = 0
+    ank_collisions = []
     for code, rows in sorted(half.items()):
         if not (0 <= code <= 0xFF) or len(rows) != 16:
             continue
-        glyph = [0] * 32
-        for r in range(8):  # pack 16 rows into 8 (OR of pairs), left byte
-            glyph[r * 2] = (rows[2 * r] | rows[2 * r + 1]) & 0xFF
-        table[0][code] = glyph
+        for j in range(16):  # flat: stream byte C*16 + j = glyph row j
+            s = code * 16 + j
+            idx, byte = s >> 5, s & 31
+            if table[0][idx][byte] and table[0][idx][byte] != rows[j]:
+                ank_collisions.append((code, j))
+            table[0][idx][byte] = rows[j] & 0xFF
         placed_half += 1
+    if ank_collisions:
+        print(f"ANK flat collisions: {len(ank_collisions)} {ank_collisions[:5]}")
 
     with open(out_path, "w") as f:
         f.write("/* Substitute kanji/ANK font for the PC-88 kanji ROM ports.\n"
@@ -139,8 +151,12 @@ def main():
         ink = sum(bin(b).count("1") for b in table[bank][got])
         print(f"  check {ch} JIS {(j1 << 8) | j2:04X}: idx {got:#05x} "
               f"(want {want:#05x}) ink {ink} {'OK' if got == want and ink else 'MISMATCH'}")
-    ink9 = sum(bin(b).count("1") for b in table[0][0x39])
-    print(f"  check ANK '9' idx 0x39: ink {ink9} {'OK' if ink9 else 'MISSING'}")
+    s9 = [table[0][(0x39 * 16 + j) >> 5][(0x39 * 16 + j) & 31] for j in range(16)]
+    ink9 = sum(bin(b).count("1") for b in s9)
+    print(f"  check ANK '9' flat stream @0x390: ink {ink9} {'OK' if ink9 else 'MISSING'}")
+    sp = [table[0][(0x50 * 16 + j) >> 5][(0x50 * 16 + j) & 31] for j in range(16)]
+    inkp = sum(bin(b).count("1") for b in sp)
+    print(f"  check ANK 'P' flat stream @0x500: ink {inkp} {'OK' if inkp else 'MISSING'}")
 
 
 if __name__ == "__main__":
