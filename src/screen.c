@@ -24,6 +24,8 @@ void key_trap_signal(int n);
 int key_trap_enabled(int n);
 
 #define BLANK_ATTR(a) ((u8)((a) & 0xE1))
+#define PAD 0xFFFEu                          /* filler cell before a kanji that did not fit */
+#define IS_RIGHT(c) (((c) & 0x8000) && (c) != PAD)
 
 /* ---------------- low level ---------------- */
 static int last_row(void) { return con_bot; }
@@ -32,7 +34,8 @@ static void put_cell(int x, int y, u16 code, u8 a)
 {
     u16 v;
     cell[y][x] = code; cattr[y][x] = a;
-    if (code < 0x100) v = code;
+    if (code == PAD) v = ' ';
+    else if (code < 0x100) v = code;
     else if (code & 0x8000) {           /* right half of kanji */
         u16 j = code & 0x7FFF;
         v = (u16)((((j & 0xFF)) << 8) | (((j >> 8) - 0x20) | 0x80));
@@ -48,7 +51,8 @@ static void redraw_row(int y)
     int x;
     for (x = 0; x < scr_w; x++) {
         u16 code = cell[y][x], v;
-        if (code < 0x100) v = code;
+        if (code == PAD) v = ' ';
+        else if (code < 0x100) v = code;
         else if (code & 0x8000) { u16 j = code & 0x7FFF; v = (u16)(((j & 0xFF) << 8) | (((j >> 8) - 0x20) | 0x80)); }
         else v = (u16)(((code & 0xFF) << 8) | ((code >> 8) - 0x20));
         vbuf[x] = v;
@@ -209,7 +213,7 @@ static void put_printable(u16 code, int wide)
 {
     if (pend_wrap) { pend_wrap = 0; advance_wrap(); }
     if (wide && cur_x >= scr_w - 1) {
-        put_cell(cur_x, cur_y, ' ', text_attr);
+        put_cell(cur_x, cur_y, PAD, text_attr);
         advance_wrap();
     }
     if (wide) {
@@ -416,67 +420,121 @@ static void show_cursor(int on)
     hal_cursor(cur_x, cur_y, on, ins_mode);
 }
 
-/* delete char at (x,y) within logical line, shifting left */
-static void line_delete_at(int x, int y)
-{
-    int bot = lline_bot(y), yy = y, xx = x;
-    for (;;) {
-        int nx = xx + 1, ny = yy;
-        if (nx >= scr_w) { nx = 0; ny++; }
-        if (ny > bot) { put_cell(xx, yy, ' ', BLANK_ATTR(text_attr)); break; }
-        put_cell(xx, yy, cell[ny][nx], cattr[ny][nx]);
-        xx = nx; yy = ny;
-    }
-}
+/* ---- logical line editing ----
+ * The logical line is taken out as a list of characters (ANK = 1 cell,
+ * kanji = 2 cells), edited, and laid out again so that a kanji is never
+ * split.  A kanji that does not fit at the last column leaves a PAD cell. */
+typedef struct { u16 code; u8 attr; } ECH;
+static ECH ebuf[25 * 80 + 8];
+static int en, ecur, e_top, e_bot;
+static int in_sx = 0, in_sy = 0;     /* start of INPUT text */
 
-/* insert blank at (x,y) within logical line, shifting right (may extend) */
-static void line_insert_at(int x, int y)
+static int is_wide(u16 c) { return c >= 0x100 && c != PAD && !(c & 0x8000); }
+
+static void ed_extract(void)
 {
-    int bot = lline_bot(y);
-    int lx = scr_w - 1, ly = bot;
-    int xx, yy;
-    if (cell[bot][scr_w - 1] != ' ') {
-        /* need a new continuation row */
-        if (bot >= con_bot) {
-            if (lline_top(y) == con_top) return;   /* cannot grow */
-            scroll_up_region(con_top, con_bot);
-            y--; bot--; cur_y--;
-        } else {
-            scroll_down_region(bot + 1, con_bot);
+    int x, y;
+    e_top = lline_top(cur_y); e_bot = lline_bot(cur_y);
+    en = 0; ecur = -1;
+    for (y = e_top; y <= e_bot; y++)
+        for (x = 0; x < scr_w; x++) {
+            u16 c = cell[y][x];
+            if (y == cur_y && x == cur_x && ecur < 0) ecur = IS_RIGHT(c) ? en - 1 : en;
+            if (c == PAD || IS_RIGHT(c)) continue;
+            ebuf[en].code = c; ebuf[en].attr = cattr[y][x]; en++;
         }
-        cont[bot + 1] = 1;
-        bot++;
-        ly = bot; lx = 0;
-    }
-    xx = lx; yy = ly;
-    while (!(xx == x && yy == y)) {
-        int px = xx - 1, py = yy;
-        if (px < 0) { px = scr_w - 1; py--; }
-        put_cell(xx, yy, cell[py][px], cattr[py][px]);
-        xx = px; yy = py;
-    }
-    put_cell(x, y, ' ', text_attr);
+    if (ecur < 0) ecur = en;
 }
 
-static void cursor_advance_edit(void)
+static void ed_newrow(int *y)
 {
-    cur_x++;
-    if (cur_x >= scr_w) {
-        cur_x = 0;
-        if (cur_y < con_bot && cont[cur_y + 1]) { cur_y++; return; }
-        /* create continuation row */
-        if (cur_y >= con_bot) { scroll_up_region(con_top, con_bot); cur_y = con_bot; clear_row(cur_y); }
-        else { scroll_down_region(cur_y + 1, con_bot); cur_y++; }
-        cont[cur_y] = 1;
+    (*y)++;
+    if (*y <= e_bot) return;
+    if (*y > con_bot) {
+        scroll_up_region(con_top, con_bot);
+        if (e_top > con_top) e_top--;
+        e_bot--; (*y)--;
+        in_sy--;
+        clear_row(*y);
+    } else {
+        scroll_down_region(*y, con_bot);
     }
+    cont[*y] = 1;
+    e_bot = *y;
+}
+
+static void ed_render(void)
+{
+    int i, x = 0, y = e_top, cx = 0, cy = e_top, yy, last;
+    last = en - 1;
+    while (last >= 0 && ebuf[last].code == ' ') last--;
+    for (i = 0; ; i++) {
+        int w;
+        if (i >= en || (i > last && i >= ecur)) break;   /* only trailing spaces remain */
+        w = is_wide(ebuf[i].code) ? 2 : 1;
+        if (x + w > scr_w) {
+            if (x < scr_w) put_cell(x, y, PAD, ebuf[i].attr);
+            ed_newrow(&y); x = 0;
+        }
+        if (i == ecur) { cx = x; cy = y; }
+        put_cell(x, y, ebuf[i].code, ebuf[i].attr);
+        if (w == 2) put_cell(x + 1, y, (u16)(ebuf[i].code | 0x8000), ebuf[i].attr);
+        x += w;
+    }
+    if (ecur >= i) {
+        if (x >= scr_w) { ed_newrow(&y); x = 0; }
+        cx = x; cy = y;
+    }
+    for (; x < scr_w; x++) put_cell(x, y, ' ', BLANK_ATTR(text_attr));
+    for (yy = y + 1; yy <= e_bot; yy++)
+        for (x = 0; x < scr_w; x++) put_cell(x, yy, ' ', BLANK_ATTR(text_attr));
+    cur_x = cx; cur_y = cy;
+}
+
+static void ed_type(u16 code)
+{
+    int i;
+    ed_extract();
+    if (ins_mode || ecur >= en) {
+        for (i = en; i > ecur; i--) ebuf[i] = ebuf[i - 1];
+        en++;
+    }
+    ebuf[ecur].code = code; ebuf[ecur].attr = text_attr;
+    ecur++;
+    ed_render();
+}
+
+static void ed_delete(int before)
+{
+    int i;
+    ed_extract();
+    if (before) { if (ecur == 0) return; ecur--; }
+    if (ecur >= en) { ed_render(); return; }
+    for (i = ecur; i < en - 1; i++) ebuf[i] = ebuf[i + 1];
+    en--;
+    ed_render();
+}
+
+static void ed_erase_eol(void)
+{
+    ed_extract();
+    en = ecur;
+    ed_render();
+}
+
+/* keep the cursor off the right half of a kanji and off PAD cells */
+static void cursor_fix_left(void)
+{
+    int n = 3;
+    while (n-- > 0 && cur_x > 0 && (IS_RIGHT(cell[cur_y][cur_x]) || cell[cur_y][cur_x] == PAD)) cur_x--;
 }
 
 int con_lineinput(char *buf, int max, int is_input)
 {
-    int sx, sy, c;
+    int c;
     pend_wrap = 0;
     if (cur_x >= scr_w) cur_x = scr_w - 1;
-    sx = cur_x; sy = cur_y;
+    in_sx = cur_x; in_sy = cur_y;
     ins_mode = 0;
     for (;;) {
         show_cursor(1);
@@ -492,11 +550,11 @@ int con_lineinput(char *buf, int max, int is_input)
         if (c == 13) {
             int top = lline_top(cur_y), bot = lline_bot(cur_y);
             int x0 = 0, y0 = top, n = 0, x, y;
-            if (is_input && sy >= top && sy <= bot) { x0 = sx; y0 = sy; }
+            if (is_input && in_sy >= top && in_sy <= bot) { x0 = in_sx; y0 = in_sy; }
             for (y = y0; y <= bot; y++) {
                 for (x = (y == y0 ? x0 : 0); x < scr_w; x++) {
                     u16 code = cell[y][x];
-                    if (code & 0x8000) continue;
+                    if (code & 0x8000) continue;     /* right half or PAD */
                     if (code >= 0x100) {
                         unsigned s = jis_to_sjis(code);
                         if (n < max - 2) { buf[n++] = (char)(s >> 8); buf[n++] = (char)(s & 0xFF); }
@@ -512,32 +570,47 @@ int con_lineinput(char *buf, int max, int is_input)
             return n;
         }
         switch (c) {
-        case 0x1C: ins_mode = 0; if (cur_x < scr_w - 1) cur_x++; else if (cur_y < con_bot) { cur_x = 0; cur_y++; } continue;
-        case 0x1D: ins_mode = 0; if (cur_x > 0) cur_x--; else if (cur_y > con_top) { cur_x = scr_w - 1; cur_y--; } continue;
-        case 0x1E: ins_mode = 0; if (cur_y > con_top) cur_y--; continue;
-        case 0x1F: ins_mode = 0; if (cur_y < con_bot) cur_y++; continue;
-        case 0x0B: ins_mode = 0; cur_x = 0; cur_y = con_top; continue;
-        case 0x0C: ins_mode = 0; scr_cls(); sx = 0; sy = con_top; continue;
-        case 0x12: ins_mode = !ins_mode; continue;
-        case 0x7F: line_delete_at(cur_x, cur_y); continue;
-        case 0x08:
-            if (cur_x > 0) cur_x--;
-            else if (cur_y > con_top && cont[cur_y]) { cur_y--; cur_x = scr_w - 1; }
-            else continue;
-            line_delete_at(cur_x, cur_y);
+        case 0x1C:
+            ins_mode = 0;
+            {
+                int w = is_wide(cell[cur_y][cur_x]) ? 2 : 1;
+                if (cell[cur_y][cur_x] == PAD) w = scr_w;
+                if (cur_x + w < scr_w) cur_x += w;
+                else if (cur_y < con_bot) { cur_x = 0; cur_y++; }
+            }
             continue;
-        case 0x09: { int n = 8 - (cur_x % 8); while (n-- > 0 && cur_x < scr_w - 1) cur_x++; } continue;
+        case 0x1D:
+            ins_mode = 0;
+            if (cur_x > 0) cur_x--; else if (cur_y > con_top) { cur_x = scr_w - 1; cur_y--; }
+            cursor_fix_left();
+            continue;
+        case 0x1E: ins_mode = 0; if (cur_y > con_top) cur_y--; cursor_fix_left(); continue;
+        case 0x1F: ins_mode = 0; if (cur_y < con_bot) cur_y++; cursor_fix_left(); continue;
+        case 0x0B: ins_mode = 0; cur_x = 0; cur_y = con_top; continue;
+        case 0x0C: ins_mode = 0; scr_cls(); in_sx = 0; in_sy = con_top; continue;
+        case 0x12: ins_mode = !ins_mode; continue;
+        case 0x7F: ed_delete(0); continue;
+        case 0x08: ed_delete(1); continue;
+        case 0x09: { int n = 8 - (cur_x % 8); while (n-- > 0 && cur_x < scr_w - 1) cur_x++; cursor_fix_left(); } continue;
         case 0x1B: continue;
-        case 0x05: { /* CTRL+E : erase to end of logical line */
-            int bot = lline_bot(cur_y), x, y;
-            for (y = cur_y; y <= bot; y++) for (x = (y == cur_y ? cur_x : 0); x < scr_w; x++) put_cell(x, y, ' ', BLANK_ATTR(text_attr));
-            continue; }
+        case 0x05: ed_erase_eol(); continue;  /* CTRL+E : erase to end of logical line */
         default: break;
         }
         if (c < 0x20) continue;
-        /* printable (SJIS pairs typed via function keys are rare; treat bytes as ANK) */
-        if (ins_mode) line_insert_at(cur_x, cur_y);
-        put_cell(cur_x, cur_y, (u16)c, text_attr);
-        cursor_advance_edit();
+        if (!ank_mode && is_lead(c)) {
+            /* Shift_JIS: the second byte follows immediately (IME / KEY strings) */
+            int c2 = con_getchar(1);
+            if (c2 >= 0x40 && c2 <= 0xFC && c2 != 0x7F) {
+                unsigned j = sjis_to_jis((unsigned)c, (unsigned)c2);
+                if ((j >> 8) >= 0x21 && (j >> 8) <= 0x7E && (j & 0xFF) >= 0x21 && (j & 0xFF) <= 0x7E) {
+                    ed_type((u16)j);
+                    continue;
+                }
+            }
+            ed_type((u16)c);
+            if (c2 >= 0 && kq_n < 16) kq[kq_n++] = c2;
+            continue;
+        }
+        ed_type((u16)c);
     }
 }
