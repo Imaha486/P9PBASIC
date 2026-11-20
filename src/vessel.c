@@ -570,6 +570,9 @@ int vessel_port_in(int port)
     switch (port) {
     case 0x44: case 0xA8: return tb_flag ? 0x02 : 0x00;  /* OPNA status: never busy */
     case 0xA9: return 1;    /* Sound Board II present */
+    case 0xAC: return opna_status_hi();  /* extended status: ADPCM-B
+                                           * EOS (bit 2) / BRDY / PLAYING,
+                                           * polled by PMD's eoscheck */
     case 0x31: case 0x32: case 0x34: case 0x35: return misc_port[port];
     case 0x70: return (int)(window_base >> 8);   /* RAM window base */
     case 0xE8: return p8_kanji_glyph[0][kanji_addr[0] >> 4][(kanji_addr[0] & 15) * 2 + 1];
@@ -608,8 +611,20 @@ void vessel_port_out(int port, int v)
     switch (port) {
     case 0x44: case 0xA8: opn_addr[0] = v; break;
     case 0x45: case 0xA9: opn_write(0, opn_addr[0], v); break;
+    /* NOTE: the 0xAA/0xAB bank-1 alias predates the 0xAC/0xAD fix.
+     * On genuine hardware (QUASI88 pc88main.cpp) OUT 0xAA is the
+     * sound interrupt-mask write, so this alias can steal a mask
+     * value into the bank-1 address latch; no guest in the current
+     * corpus is known to need the alias. Flagged in
+     * docs/APPROXIMATIONS.md item 20 for the multi-title check. */
     case 0x46: case 0xAA: opn_addr[1] = v; break;
     case 0x47: case 0xAB: opn_write(1, opn_addr[1], v); break;
+    /* PMD88 addresses the OPNA's bank 1 through the 0xAC/0xAD pair
+     * (the board's A8-AF decode; QUASI88 pc88main.cpp cases 0xac/0xad).
+     * Without these, every ADPCM-B register write from PMD was dropped
+     * and the PCM part played silently. */
+    case 0xAC: opn_addr[1] = v; break;
+    case 0xAD: opn_write(1, opn_addr[1], v); break;
     case 0x31: case 0x32: case 0x34: case 0x35: misc_port[port] = (unsigned char)v; break;
     case 0x70: window_base = (unsigned)(v & 0xFF) << 8; break;
     case 0xE4: intr_level = (v & 0x08) ? 7 : (v & 0x07); break;

@@ -194,6 +194,22 @@ int main(int argc, char **argv)
             if (f) { fwrite(vessel_vram_plane(b), 1, 0x4000, f); fclose(f); }
         }
     }
+    if (getenv("P8P_DUMPFULL")) {
+        FILE *f = fopen("full.bin", "wb");
+        int i;
+        if (f) {
+            for (i = 0; i < 0x10000; i++) { int b = hal_peek(0, i); fputc(b, f); }
+            fclose(f);
+        } else fprintf(stderr, "P8P_DUMPFULL: cannot open full.bin\n");
+    }
+    if (getenv("P8P_DUMPDB")) {
+        FILE *f = fopen("db.bin", "wb");
+        int i;
+        if (f) {
+            for (i = 0; i < 0x8000; i++) { int b = hal_peek(0, 0x2000 + i); fputc(b, f); }
+            fclose(f);
+        } else fprintf(stderr, "P8P_DUMPDB: cannot open db.bin\n");
+    }
     if (getenv("P8P_DUMPRAM")) {
         int i;
         printf("RAM2000:");

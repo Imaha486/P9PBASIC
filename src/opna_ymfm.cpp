@@ -248,6 +248,16 @@ extern "C" void opna_write(int bank, int addr, int value)
     }
 }
 
+extern "C" int opna_status_hi(void)
+{
+    /* Headless fallback (no WAV/sink, chip inert): report EOS set
+     * with PLAYING/BUSY clear so PMD's completion check proceeds.
+     * Note this reads EOS as set before any key-on and BRDY as
+     * clear, unlike the live chip. */
+    if (!ensure_init()) return 0x04;
+    return chip.read_status_hi();
+}
+
 extern "C" void opna_advance(long cpu_cycles)
 {
     if (!ensure_init()) return;

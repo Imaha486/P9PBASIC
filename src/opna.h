@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 void opna_write(int bank, int addr, int value);
+int  opna_status_hi(void);   /* extended status (ADPCM-B flags) */
 void opna_advance(long cpu_cycles);
 /* Write / read one byte of the OPNA's ADPCM-B sample DRAM (256 KiB,
  * the Sound Board II's only writable sample memory). FFDE service 1
