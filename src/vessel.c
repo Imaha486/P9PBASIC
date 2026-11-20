@@ -974,8 +974,22 @@ static int slot_vrtc_seen = 0, slot_opn_seen = 0;
 static long tb_period(void)
 {
     /* Timer B period in 4 MHz CPU cycles: (256 - reg26) counts of
-     * 1152 OPNA clocks at 7.9872 MHz. */
-    return (long)(256 - opn_reg[0][0x26]) * 1152L * 4000L / 7987L;
+     * 1152 timer clocks at an effective Timer B clock of 3.9936 MHz.
+     *
+     * This follows QUASI88's calibrated interrupt model (src/intr.cpp:
+     * sd_B_intr_base = TIMER_B_CONST 192 * sound_prescaler 6 *
+     * (256 - reg) CPU cycles, sound clock default 3.9936 MHz), which the
+     * user ear-verified as the genuine tempo on 2026-11-20. The previous
+     * 7.9872 MHz assumption made Timer B-driven playback run at roughly
+     * twice the intended tempo.
+     *
+     * Timing only: QUASI88's fmgen pitch/ADPCM clock is a separate fixed
+     * 8 MHz, so opna_ymfm.cpp's CHIP_CLOCK stays 7987200 and must not be
+     * changed to match this.
+     *
+     * The ratio is exact: 1152 * 4000000/3993600 == 15000/13, and the
+     * reduced form keeps every intermediate within a 32-bit long. */
+    return (long)(256 - opn_reg[0][0x26]) * 15000L / 13L;
 }
 
 static void irq_advance(long cycles)

@@ -155,7 +155,7 @@ DR=$(sed -n 's/.*dropped=\([0-9]*\).*/\1/p' "$WORK/embed40.log")
 if [ -n "$D" ] && [ -f "$D/vram0.bin" ]; then
   python3 - "$D" <<'EOF' || bad "embed40: VRAM plane counts changed"
 import sys
-want = [4555, 4770, 5394]
+want = [7054, 7111, 7876]
 got = []
 for b in range(3):
     data = open("%s/vram%d.bin" % (sys.argv[1], b), "rb").read()
