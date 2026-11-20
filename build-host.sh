@@ -14,6 +14,7 @@ CXX=${CXX:-c++}
 CSRC="src/main.c src/exec.c src/eval.c src/var.c src/num.c src/token.c
       src/print.c src/screen.c src/graph.c src/fileio.c src/halhost.c
       src/vessel.c src/p88disk.c src/p88conv.c src/materialize.c
+      src/kanjifont.c
       third_party/z80/z80.c"
 CXXSRC="src/opna_ymfm.cpp
         third_party/ymfm/src/ymfm_opn.cpp

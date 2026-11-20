@@ -25,7 +25,8 @@ note "build"
 # they link the embed objects minus every test main.
 EMBED_OBJS=$(ls build-embed/*.o | grep -v embed_test \
              | grep -v textmerge_test | grep -v window_test \
-             | grep -v subsys_test | grep -v dramload_test)
+             | grep -v subsys_test | grep -v dramload_test \
+             | grep -v kanjifont_test)
 unit_test() { # name [args...]
   _t=$1; shift
   cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c "tools/$_t.c" \
@@ -37,6 +38,7 @@ unit_test() { # name [args...]
 }
 unit_test textmerge_test
 unit_test window_test
+unit_test kanjifont_test
 echo "build ok"
 
 if [ ! -f "$DISK" ]; then

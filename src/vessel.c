@@ -386,6 +386,16 @@ static uint16_t win_addr(uint16_t addr)
  * MENU failure (line-2040 overflow, silent attract). Only the Z80 bus
  * view is banked; the interpreter's own PEEK/POKE stay on flat RAM,
  * matching how the drivers always restore MAIN before returning. */
+/* Kanji ROM port interface (ports E8-EF): the guest latches a 16-bit
+ * glyph address (E8=low, E9=high for ROM 1; EC/ED for ROM 2) and reads
+ * the glyph row back a byte at a time - IN E9 returns byte [0] (the
+ * left half of the row), IN E8 byte [1] (the right half). The glyph
+ * data itself is a substitute font generated from an open-licensed
+ * source (src/kanjifont.c); no NEC ROM dump is used. EA/EB writes are
+ * accepted and ignored, matching QUASI88's behaviour. */
+extern const unsigned char p8_kanji_glyph[2][4096][32];
+static unsigned short kanji_addr[2];
+
 static unsigned char gvram[3][0x4000];  /* planes: 0=B, 1=R, 2=G */
 static int mem_bank = 3;                /* 0..2 = plane, 3 = main RAM */
 static int intr_level = 7;              /* port E4 priority level: the
@@ -529,6 +539,10 @@ int vessel_port_in(int port)
     case 0xA9: return 1;    /* Sound Board II present */
     case 0x31: case 0x32: case 0x34: case 0x35: return misc_port[port];
     case 0x70: return (int)(window_base >> 8);   /* RAM window base */
+    case 0xE8: return p8_kanji_glyph[0][kanji_addr[0] >> 4][(kanji_addr[0] & 15) * 2 + 1];
+    case 0xE9: return p8_kanji_glyph[0][kanji_addr[0] >> 4][(kanji_addr[0] & 15) * 2 + 0];
+    case 0xEC: return p8_kanji_glyph[1][kanji_addr[1] >> 4][(kanji_addr[1] & 15) * 2 + 1];
+    case 0xED: return p8_kanji_glyph[1][kanji_addr[1] >> 4][(kanji_addr[1] & 15) * 2 + 0];
     }
     return 0xFF;
 }
@@ -566,6 +580,11 @@ void vessel_port_out(int port, int v)
     case 0x31: case 0x32: case 0x34: case 0x35: misc_port[port] = (unsigned char)v; break;
     case 0x70: window_base = (unsigned)(v & 0xFF) << 8; break;
     case 0xE4: intr_level = (v & 0x08) ? 7 : (v & 0x07); break;
+    case 0xE8: kanji_addr[0] = (unsigned short)((kanji_addr[0] & 0xFF00) | (v & 0xFF)); break;
+    case 0xE9: kanji_addr[0] = (unsigned short)((kanji_addr[0] & 0x00FF) | ((v & 0xFF) << 8)); break;
+    case 0xEC: kanji_addr[1] = (unsigned short)((kanji_addr[1] & 0xFF00) | (v & 0xFF)); break;
+    case 0xED: kanji_addr[1] = (unsigned short)((kanji_addr[1] & 0x00FF) | ((v & 0xFF) << 8)); break;
+    case 0xEA: case 0xEB: break;   /* accepted, ignored (QUASI88 parity) */
     case 0x5C: mem_bank = 0; break;     /* VRAM plane B */
     case 0x5D: mem_bank = 1; break;     /* VRAM plane R */
     case 0x5E: mem_bank = 2; break;     /* VRAM plane G */
