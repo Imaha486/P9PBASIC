@@ -142,10 +142,13 @@ static int d88_state = 0;   /* 0 = not tried, 1 = ok, -1 = unavailable */
  * XDE services take the image index as their second argument
  * (MA2026: image 0 = "MusicArena2026 A", image 1 = "... B" — the
  * song data lives on B, everything else on A). Bases are recorded
- * at open; an out-of-range index falls back to image 0. */
+ * at open; an index the file does not hold is a read failure
+ * (d88_base), never a fallback to image 0: the fallback played
+ * image 0's bytes as a song on an A-only file. */
 #define D88_MAX_IMAGES 8
 static long d88_image_base[D88_MAX_IMAGES];
 static int d88_image_count = 0;
+static int xde_img_warned = 0;  /* see xde_image_ok */
 
 static int d88_open(void)
 {
@@ -158,6 +161,16 @@ static int d88_open(void)
     fp = fopen(fn, "rb");
     if (!fp) { if (tracing()) fprintf(stderr, "SUBSYS cannot open %s\n", fn); return 0; }
     d88_size = (long)fread(d88, 1, (size_t)D88_MAX, fp);
+    /* A file that does not fit the buffer is refused, not cut short:
+     * the images and sectors past the cut would silently be missing.
+     * Reported even with tracing off - every later read fails. */
+    if (d88_size == D88_MAX && fgetc(fp) != EOF) {
+        fclose(fp);
+        fprintf(stderr, "VESSEL disk %s is larger than %ld bytes,"
+                " not loaded\n", fn, D88_MAX);
+        d88_size = 0;
+        return 0;
+    }
     fclose(fp);
     if (d88_size < 0x20 + 164 * 4) return 0;
     d88_image_count = 0;
@@ -189,9 +202,11 @@ void vessel_forget_disk(void)
     d88_state = 0; d88_size = 0; d88_image_count = 0;
 }
 
+/* file offset of disk image `img`, or -1 when the open file holds no
+ * such image (the caller fails the read / write) */
 static long d88_base(int img)
 {
-    if (img < 0 || img >= d88_image_count) return 0;
+    if (img < 0 || img >= d88_image_count) return -1;
     return d88_image_base[img];
 }
 
@@ -216,6 +231,7 @@ static int d88_read_sector_img(int img, int t, int r, unsigned char *dst)
     if (!d88_open()) return 0;
     if (t < 0 || t >= 164) return 0;
     base = d88_base(img);
+    if (base < 0) return 0;
     cyl = t >> 1; head = t & 1;
     block = d88_u32(base + 0x20 + (long)(cyl * 2 + head) * 4);
     if (block == 0 || base + (long)block + 16 > d88_size) return 0;
@@ -251,6 +267,7 @@ static int d88_write_sector_img(int img, int t, int r, const unsigned char *src)
     if (!d88_open()) return 0;
     if (t < 0 || t >= 164) return 0;
     base = d88_base(img);
+    if (base < 0) return 0;
     cyl = t >> 1; head = t & 1;
     block = d88_u32(base + 0x20 + (long)(cyl * 2 + head) * 4);
     if (block == 0 || base + (long)block + 16 > d88_size) return 0;
@@ -271,18 +288,12 @@ static int d88_write_sector_img(int img, int t, int r, const unsigned char *src)
     return 0;
 }
 
-/* image 0 reader: the disk subsystem model and the file layer
- * address the boot disk only */
-static int d88_read_sector(int t, int r, unsigned char *dst)
-{
-    return d88_read_sector_img(0, t, r, dst);
-}
-
 /* public raw sector access (track = cyl*2+head, r = sector id) for
- * the Disk BASIC file layer (p88disk.c) */
+ * the Disk BASIC file layer (p88disk.c), which addresses the boot
+ * disk (image 0) only */
 int vessel_d88_sector(int t, int r, unsigned char *dst)
 {
-    return d88_read_sector(t, r, dst);
+    return d88_read_sector_img(0, t, r, dst);
 }
 
 /* ================= disk subsystem command processor ================= */
@@ -318,26 +329,38 @@ static int oq_pop(void)
     return v;
 }
 
+/* Read / write commands (02H / 01H): parameters are sector count,
+ * drive, track, sector. The drive number selects the disk image
+ * bundled in the D88 file - drive n holds image n, the mapping the
+ * XDE services use for their disk argument - so a drive with no
+ * image fails like any unreadable sector (d88_base). A request for
+ * more sectors than the transfer buffer holds (64) is refused whole
+ * in both directions: nothing is read or written, and the error
+ * reaches the guest through the status command (06H, bit 0).
+ * read_len is published only once every sector of the request has
+ * been read: a read that fails part-way leaves it 0, so the send-data
+ * command (03H / 12H) hands the guest nothing, not the sectors that
+ * happened to precede the bad one. */
 static void subsys_read(void)
 {
-    int nsec = sub_par[0], t = sub_par[2], r = sub_par[3], k;
+    int nsec = sub_par[0], drv = sub_par[1], t = sub_par[2], r = sub_par[3], k;
     read_len = 0; read_valid = 0;
-    if (nsec > (int)(sizeof(read_buf) / 256)) nsec = (int)(sizeof(read_buf) / 256);
+    if (nsec > (int)(sizeof(read_buf) / 256)) { sub_err = 1; return; }
     for (k = 0; k < nsec; k++) {
-        if (!d88_read_sector(t, r, read_buf + (unsigned)k * 256)) { sub_err = 1; return; }
-        read_len += 256;
+        if (!d88_read_sector_img(drv, t, r, read_buf + (unsigned)k * 256)) { sub_err = 1; return; }
         if (++r > 16) { r = 1; t++; }
     }
+    read_len = (unsigned)nsec * 256;
     read_valid = 1; sub_err = 0;
 }
 
 static void subsys_write(void)
 {
-    int nsec = sub_par[0], t = sub_par[2], r = sub_par[3], k;
+    int nsec = sub_par[0], drv = sub_par[1], t = sub_par[2], r = sub_par[3], k;
     sub_err = 0;
-    if (nsec > (int)(sizeof(write_buf) / 256)) { nsec = (int)(sizeof(write_buf) / 256); sub_err = 1; }
+    if (nsec > (int)(sizeof(write_buf) / 256)) { sub_err = 1; return; }
     for (k = 0; k < nsec; k++) {
-        if (!d88_write_sector_img(0, t, r, write_buf + (unsigned)k * 256)) { sub_err = 1; return; }
+        if (!d88_write_sector_img(drv, t, r, write_buf + (unsigned)k * 256)) { sub_err = 1; return; }
         if (++r > 16) { r = 1; t++; }
     }
 }
@@ -659,14 +682,34 @@ static void tb_line_update(void)
     tb_line = line;
 }
 
+static void tb_restart(void);           /* with the interrupt model below */
+
+/* Bank-0 data-port read (QUASI88 sound_in_data): registers 00H-0FH
+ * (the SSG block) read back what was written, FFH is the board-ID
+ * register - `id` is this port's answer, 1 = Sound Board II - and
+ * every other register is write-only and reads 0. */
+static int opn_data_read(int id)
+{
+    int a = opn_addr[0] & 0xFF;
+    if (a < 0x10) return opn_reg[0][a];
+    if (a == 0xFF) return id;
+    return 0;
+}
+
 static void opn_write(int bank, int addr, int v)
 {
+    int load_b = bank == 0 && addr == 0x27 && (opn_reg[0][0x27] & 0x02);
     opn_reg[bank][addr] = (unsigned char)v;
     opna_write(bank, addr, v);          /* sound rendering sink (ymfm) */
     if (bank == 1) { opn_nwrite1[addr]++; return; }
     if (bank == 0) {
         opn_nwrite[addr]++;
         if (addr == 0x27) {
+            /* LOAD B (bit 1) rising: the counter loads the period.
+             * A timer stopped and started again begins a whole
+             * period, it does not resume the one it was stopped in
+             * (QUASI88 check_sound_parm_update; ymfm update_timer). */
+            if ((v & 0x02) && !load_b) tb_restart();
             if (v & 0x20) tb_flag = 0;                  /* RST B (bit 5) */
             tb_line_update();   /* flag reset / IRQ enable B change */
         }
@@ -720,11 +763,30 @@ int vessel_port_in(int port)
     note_port(in_seen, "IN", port, -1);
     if (port <= 0x0E) return hal_keymatrix(port);   /* keyboard matrix rows */
     switch (port) {
-    case 0x44: case 0xA8: return tb_flag ? 0x02 : 0x00;  /* OPNA status: never busy */
-    case 0xA9: return 1;    /* Sound Board II present */
-    case 0xAC: return opna_status_hi();  /* extended status: ADPCM-B
-                                           * EOS (bit 2) / BRDY / PLAYING,
-                                           * polled by PMD's eoscheck */
+    /* OPNA read ports. One chip answers on both decodes (44H-47H and
+     * A8H-ADH), port for port as in QUASI88 (pc88main.cpp main_io_in,
+     * soundbd.cpp):
+     *   44H / A8H  status: bit 1 = Timer B flag, never busy. Taken
+     *              from the vessel's own timer model, not from ymfm's
+     *              read_status(): the wrapper has no ymfm_set_timer
+     *              backend, so the chip's own timer flags never set.
+     *              (Timer A is not modelled: bit 0 reads 0.)
+     *   45H / A9H  bank-0 data port (opn_data_read)
+     *   46H / ACH  extended status from ymfm's read_status_hi():
+     *              ADPCM-B EOS (bit 2) / BRDY (bit 3) / PLAYING
+     *              (bit 5) under the guest's flag mask (bank-1
+     *              register 10H). NEOMSC's ADPCM transfer polls BRDY
+     *              on 46H, PMD's eoscheck polls EOS on ACH. Bits 0-1
+     *              (the timer flags) read 0 here for the reason above.
+     *   47H / ADH  bank-1 data port: the ADPCM-B memory read
+     *              (register 08H), 0 for the other registers. */
+    case 0x44: case 0xA8: return tb_flag ? 0x02 : 0x00;
+    /* The board-ID register (FFH) answers 1 = Sound Board II on both
+     * decodes, as in QUASI88: MENU.ALP probes each one (190:
+     * OUT &H44,255:A=INP(&H45):IF A=1, 200: the A8H/A9H twin). */
+    case 0x45: case 0xA9: return opn_data_read(1);
+    case 0x46: case 0xAC: return opna_status_hi();
+    case 0x47: case 0xAD: return opna_data_hi(opn_addr[1] & 0xFF);
     case 0x31: case 0x32: case 0x34: case 0x35: return misc_port[port];
     case 0x70: return (int)(window_base >> 8);   /* RAM window base */
     case 0xE8: return p8_kanji_glyph[0][kanji_addr[0] >> 4][(kanji_addr[0] & 15) * 2 + 1];
@@ -1164,6 +1226,53 @@ static long tb_period(void)
     return (long)(256 - opn_reg[0][0x26]) * 15000L / 13L;
 }
 
+/* Timer B started (reg 0x27 LOAD B 0 -> 1, see opn_write): the
+ * counter begins a whole period. */
+static void tb_restart(void)
+{
+    tb_left = tb_period();
+}
+
+/* Diagnostic snapshot for the regression suite (vessel_diag_*): the
+ * delivery counts, and the emulated second at which the counters are
+ * frozen. Emulated time, not wall time: a host samples the engine
+ * thread at an arbitrary moment, the snapshot point is the same
+ * instruction on every run. */
+static unsigned long irq_tb_count = 0, irq_vrtc_count = 0;
+static long emu_sub = 0;                    /* cycles into the current second */
+static long emu_secs = 0;                   /* whole emulated seconds this session */
+static long diag_at = 0;                    /* snapshot second, 0 = off */
+static int diag_taken = 0;
+static VesselDiag diag;
+
+static void diag_take(void)
+{
+    diag.tb_irqs = irq_tb_count;
+    diag.vrtc_irqs = irq_vrtc_count;
+    diag.b0_ssg = vessel_opn_class(0x00, 0x0F);
+    diag.b0_rhythm = vessel_opn_class(0x10, 0x1F);
+    diag.b0_mode = vessel_opn_class(0x20, 0x2F);
+    diag.b0_fm = vessel_opn_class(0x30, 0xFF);
+    diag.b0_keyon = opn_nwrite[0x28];
+    diag.b0_tb = opn_nwrite[0x26];
+    diag.b1_adpcm = vessel_opn_rhythm_writes();
+    diag.b1_fm = vessel_opn_writes1() - diag.b1_adpcm;
+    diag.adpcm_b_reads = opna_adpcm_b_ext_reads();
+    diag_taken = 1;
+}
+
+void vessel_diag_snapshot_at(long emu_seconds)
+{
+    diag_at = emu_seconds > 0 ? emu_seconds : 0;
+}
+
+int vessel_diag_snapshot(VesselDiag *out)
+{
+    if (!diag_taken) return 0;
+    *out = diag;
+    return 1;
+}
+
 static void irq_advance(long cycles)
 {
     opna_advance(cycles);               /* audio rendering follows the same clock */
@@ -1186,9 +1295,15 @@ static void irq_advance(long cycles)
         }
     }
     tb_line_update();
+    for (emu_sub += cycles; emu_sub >= 4000000L; emu_sub -= 4000000L) emu_secs++;
+    if (diag_at && !diag_taken && emu_secs >= diag_at) diag_take();
 }
 
-/* Queue at most one interrupt with the CPU core (Timer B first).
+/* Queue at most one interrupt with the CPU core, the higher priority
+ * first: VSYNC outranks the sound interrupt on the genuine controller
+ * (the same order as the port-E4 thresholds below), so when both are
+ * latched VSYNC is delivered and Timer B stays latched for the next
+ * call.
  * Deliveries are gated by the port-E4 priority level, as on hardware:
  * the sound interrupt needs level >= 5, VSYNC >= 2; a request whose
  * level is too low stays pending (the PIC latches it) until the level
@@ -1200,6 +1315,18 @@ static void irq_service(void)
 {
     unsigned h;
     if (cpu.int_pending) return;
+    if (vrtc_due && intr_level >= 2) {
+        h = rd16((IRQ_PAGE << 8) | VRTC_VEC);
+        if (h >= 0x8000) {
+            vrtc_due = 0;
+            if (!slot_vrtc_seen && tracing()) fprintf(stderr, "VESSEL VRTC int handler %04X\n", h);
+            slot_vrtc_seen = 1;
+            irq_vrtc_count++;
+            z80_gen_int(&cpu, VRTC_VEC);
+            return;
+        }
+        vrtc_due = 0;
+    }
     if (tb_due && intr_level >= 5) {
         h = rd16((IRQ_PAGE << 8) | OPN_VEC);
         if (h >= 0x8000) {
@@ -1209,21 +1336,11 @@ static void irq_service(void)
             if (trace_sp() && mem_bank != 3)
                 fprintf(stderr, "IRQFIRE bank=%d alu=%d pc=%04X\n",
                         mem_bank, vram_way(), (unsigned)cpu.pc);
+            irq_tb_count++;
             z80_gen_int(&cpu, OPN_VEC);
             return;
         }
         tb_due = 0;
-    }
-    if (vrtc_due && intr_level >= 2) {
-        h = rd16((IRQ_PAGE << 8) | VRTC_VEC);
-        if (h >= 0x8000) {
-            vrtc_due = 0;
-            if (!slot_vrtc_seen && tracing()) fprintf(stderr, "VESSEL VRTC int handler %04X\n", h);
-            slot_vrtc_seen = 1;
-            z80_gen_int(&cpu, VRTC_VEC);
-            return;
-        }
-        vrtc_due = 0;
     }
 }
 
@@ -1345,6 +1462,13 @@ void vessel_session_reset(void)
     vrtc_due = 0; tb_due = 0;
     run_poll_left = PUMP_SLICE;
     slot_vrtc_seen = 0; slot_opn_seen = 0;
+    /* diagnostics: counts, emulated clock and the snapshot restart
+     * with the session; the armed snapshot second (diag_at) is the
+     * host's setting and stays */
+    irq_tb_count = 0; irq_vrtc_count = 0;
+    emu_sub = 0; emu_secs = 0;
+    diag_taken = 0;
+    xde_img_warned = 0;
     /* CPU, GVRAM, bank, port defaults, palette, window, RAM stubs */
     pump_live = 0;
     inited = 1;
@@ -1640,6 +1764,26 @@ static void vessel_burn(long cycles)
     }
 }
 
+/* The XDE services' disk argument must name an image the open D88
+ * file holds. A request for any other image reads nothing (the
+ * services return 0 sectors, as for an unreadable first sector) and
+ * is reported once per session even with tracing off, so a title
+ * asking for its second disk on a one-image file does not go on
+ * silently with whatever was in memory. With no disk open at all
+ * the read fails the same way, without the message. */
+static int xde_image_ok(int img)
+{
+    if (!d88_open()) return 0;
+    if (d88_base(img) >= 0) return 1;
+    if (!xde_img_warned) {
+        xde_img_warned = 1;
+        fprintf(stderr, "VESSEL XDE: disk image %d is not in the disk"
+                " file (%d image%s), nothing read\n",
+                img, d88_image_count, d88_image_count == 1 ? "" : "s");
+    }
+    return 0;
+}
+
 /* FFDE service 1 equivalent: bulk-load `tracks` logical tracks
  * starting at logical track `ltrack` from disk image `img` of the
  * P8P_DISK file into the OPNA's ADPCM-B sample DRAM (the Sound
@@ -1654,6 +1798,7 @@ int vessel_dram_load(int img, int ltrack, int tracks)
     unsigned char buf[256];
     int n = 0, stored = 0, t, r, b;
     unsigned long dst = 0;
+    if (!xde_image_ok(img)) return 0;
     for (t = ltrack; t < ltrack + tracks; t++) {
         for (r = 1; r <= 16; r++) {
             if (!d88_read_sector_img(img, t, r, buf)) return stored;
@@ -1676,6 +1821,7 @@ int vessel_disk_read(int img, int ltrack, int sector, int count, unsigned addr)
 {
     unsigned char buf[256];
     int i, t = ltrack, r = sector;
+    if (!xde_image_ok(img)) return 0;
     for (i = 0; i < count; i++) {
         int j;
         if (!d88_read_sector_img(img, t, r, buf)) break;

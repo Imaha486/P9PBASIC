@@ -81,6 +81,62 @@ int main(void)
     chk("EOS set on port 0xAC after sample end",
         (vessel_port_in(0xAC) & 0x04) != 0, 1);
 
+    /* the 46H decode reads the same extended status (NEOMSC's ADPCM
+     * transfer polls BRDY there) */
+    chk("port 0x46 reads the extended status too",
+        vessel_port_in(0x46), vessel_port_in(0xAC));
+
+    /* bank-0 data port: the board-ID register answers the Sound
+     * Board II probe, the SSG registers read back, the rest read 0 */
+    vessel_port_out(0xA8, 0xFF);
+    chk("port 0xA9, register FF: Sound Board II", vessel_port_in(0xA9), 1);
+    chk("port 0x45, register FF: Sound Board II", vessel_port_in(0x45), 1);
+    vessel_port_out(0x44, 0xFF);        /* MENU.ALP 190: OUT &H44,255:A=INP(&H45) */
+    chk("port 0x45 after OUT 0x44,FF: Sound Board II", vessel_port_in(0x45), 1);
+    vessel_port_out(0xA8, 0x07);
+    vessel_port_out(0xA9, 0x38);
+    chk("port 0xA9, SSG register reads back", vessel_port_in(0xA9), 0x38);
+    chk("port 0x45, SSG register reads back", vessel_port_in(0x45), 0x38);
+    vessel_port_out(0xA8, 0x30);
+    chk("port 0xA9, write-only register reads 0", vessel_port_in(0xA9), 0);
+    chk("port 0x45, write-only register reads 0", vessel_port_in(0x45), 0);
+
+    /* bank-1 data port: the ADPCM-B memory read (register 08H) on
+     * both decodes, 0x47 and 0xAD. Known bytes go into the DRAM, the
+     * chip is put in external-memory read mode at address 0 and the
+     * two dummy reads the mode starts with are consumed, one per
+     * port; the reads that follow walk the DRAM, so each port must
+     * hand back the byte at its turn. */
+    opna_adpcm_b_write(0, 0xA5);
+    opna_adpcm_b_write(1, 0x3C);
+    opna_adpcm_b_write(2, 0x69);
+    opna_adpcm_b_write(3, 0xD2);
+    regw(0x00, 0x01);           /* reset */
+    regw(0x01, 0x00);           /* DRAM */
+    regw(0x02, 0x00);           /* start address L */
+    regw(0x03, 0x00);           /* start address H */
+    regw(0x04, 0xFF);           /* stop address L */
+    regw(0x05, 0xFF);           /* stop address H */
+    regw(0x0C, 0xFF);           /* limit address L */
+    regw(0x0D, 0xFF);           /* limit address H */
+    regw(0x00, 0x20);           /* memory read mode */
+    vessel_port_out(0xAC, 0x08);        /* select the memory data register */
+    {
+        unsigned long before = opna_adpcm_b_ext_reads();
+        chk("port 0x47, first dummy read", vessel_port_in(0x47), 0);
+        chk("port 0xAD, second dummy read", vessel_port_in(0xAD), 0);
+        chk("dummy reads fetch no DRAM byte", (long)(opna_adpcm_b_ext_reads() - before), 0);
+        chk("port 0x47 reads DRAM byte 0", vessel_port_in(0x47), 0xA5);
+        chk("port 0xAD reads DRAM byte 1", vessel_port_in(0xAD), 0x3C);
+        vessel_port_out(0x46, 0x08);    /* the 46H address port selects it too */
+        chk("port 0xAD reads DRAM byte 2", vessel_port_in(0xAD), 0x69);
+        chk("port 0x47 reads DRAM byte 3", vessel_port_in(0x47), 0xD2);
+        chk("four bytes fetched from the DRAM", (long)(opna_adpcm_b_ext_reads() - before), 4);
+    }
+    vessel_port_out(0xAC, 0x30);
+    chk("port 0x47, other register reads 0", vessel_port_in(0x47), 0);
+    chk("port 0xAD, other register reads 0", vessel_port_in(0xAD), 0);
+
     if (fails) { printf("pcmb_ports_test: %d FAIL\n", fails); return 1; }
     printf("pcmb_ports_test: ok\n");
     return 0;

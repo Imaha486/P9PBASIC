@@ -1,5 +1,5 @@
 ----- SCREEN -----
-00|p1= 255
+00|p1= 1
 01|p2= 1
 02|PLAYING
 03|STOPPED

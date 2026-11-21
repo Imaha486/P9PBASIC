@@ -77,7 +77,7 @@ void hal_term(void) { }
 void hal_tput(int x, int y, unsigned short v, unsigned char a)
 {
     if (w40) x *= 2;
-    if (x < 80 && y < 25) { tv[y][x] = v; ta[y][x] = a; }
+    if (x >= 0 && x < 80 && y >= 0 && y < 25) { tv[y][x] = v; ta[y][x] = a; }
 }
 
 void hal_trow(int y, const unsigned short *codes, const unsigned char *attrs, int n)

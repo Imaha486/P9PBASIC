@@ -31,7 +31,14 @@ the image itself.
   run in the host interpreter and their printed results checked
   (type, value and precedence of constants; label separators, case
   folding, dotted names), and the last line of each fixture is a
-  plain statement (final-line framing).
+  plain statement (final-line framing). `tools/d88fix_test.c` also
+  runs here, without the game disk: it builds synthetic D88 images
+  (two bundled images, cut-off files, a broken track table, a
+  zero-length sector, an oversized file, a directory entry named
+  `../X`) and checks that the sector reader, the XDE natives, the
+  disk subsystem commands, the file layer and the materializer fail
+  on what they cannot read instead of substituting other data
+  (docs/APPROXIMATIONS.md item 28).
 - **Tier A (assertions)** — probe outcomes whose correct values are
   known from the genuine machine and the NEOMSC contract
   (docs/NEOMSC-CONTRACT.md): the FFDF data-slot pointers, the song-DB
@@ -59,7 +66,20 @@ the image itself.
   audio ring must not drop more than 20,000 frames, and the produced
   audio must follow the genuine phase order (loading BGM through the
   loads, a quiet gap, attract songs loud) as checked by
-  `tests/wavprofile.py`.
+  `tests/wavprofile.py`. Peaks and phase order do not pin the audio
+  *content* (a build playing at twice the tempo passed them), so the
+  55 s run also freezes the vessel's diagnostic counters at emulated
+  second 50 — Timer B and VRTC deliveries, OPNA register writes by
+  class for both banks, ADPCM-B sample reads — and compares them
+  exactly with `tests/expected/embed55.counters`. The snapshot point
+  is emulated time, so the values do not depend on host scheduling.
+  Pin the file from a build known to be correct with
+
+      tests/run_regress.sh --pin-counters
+
+  and review its diff like a baseline (`--bless` does not touch it).
+  While the file is missing the suite prints a NOTE and does not
+  check the counters.
 
 The QUASI88 differential check lives outside this suite (it needs
 the user's own ROM dump and an X server); see docs/HOST-CLI.md and

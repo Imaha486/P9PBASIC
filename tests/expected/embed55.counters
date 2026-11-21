@@ -1,0 +1,31 @@
+# Embed audio tier, 55 s MA2026 run: vessel diagnostic counters at
+# emulated second 50 (tests/run_regress.sh, review item C-1).
+# Written by tests/run_regress.sh --pin-counters; exact match required.
+#   tb_irqs        Timer B interrupt vectors queued = sequencer ticks:
+#                  the tempo (a 2x-tempo build doubles it)
+#   vrtc_irqs      VRTC interrupt vectors queued: the 60 Hz cadence and
+#                  the VSYNC mask / priority handling
+#   b0_ssg         bank-0 writes 00-0F: the SSG parts
+#   b0_rhythm      bank-0 writes 10-1F: the rhythm (ADPCM-A) part
+#   b0_mode        bank-0 writes 20-2F: timer control, acknowledges,
+#                  key on/off
+#   b0_fm          bank-0 writes 30-FF: FM channels 1-3 (tone, volume,
+#                  pitch)
+#   b0_keyon       bank-0 writes to 28: FM notes started / stopped
+#   b0_tb          bank-0 writes to 26: tempo settings
+#   b1_adpcm       bank-1 writes 00-2F: the ADPCM-B (PCM) part's
+#                  registers, through PMD's AC/AD port pair
+#   b1_fm          bank-1 writes 30-FF: FM channels 4-6
+#   adpcm_b_reads  sample bytes the chip fetched from the ADPCM-B DRAM:
+#                  PCM actually played from the loaded block
+counter tb_irqs=3320
+counter vrtc_irqs=2872
+counter b0_ssg=8508
+counter b0_rhythm=9
+counter b0_mode=8915
+counter b0_fm=13131
+counter b0_keyon=2262
+counter b0_tb=3322
+counter b1_adpcm=4055
+counter b1_fm=2749
+counter adpcm_b_reads=87387

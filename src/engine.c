@@ -39,8 +39,8 @@ struct P8Engine {
     int ring_head, ring_tail;
     unsigned long dropped;
     unsigned long rendered;         /* all frames the sink ever saw */
-    struct timespec t0;             /* p8_start wall clock */
-    pthread_mutex_t ring_mu;
+    struct timespec t0;             /* p8_start wall clock (under ring_mu) */
+    pthread_mutex_t ring_mu;        /* guards the ring and t0 */
 };
 
 static P8Engine *g_engine = 0;      /* single instance, see engine.h */
@@ -53,11 +53,17 @@ double p8_audio_seconds(void)
 
 double p8_wall_seconds(void)
 {
-    struct timespec ts;
+    struct timespec ts, t0;
     if (!g_engine) return 0;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)(ts.tv_sec - g_engine->t0.tv_sec) +
-           (double)(ts.tv_nsec - g_engine->t0.tv_nsec) / 1e9;
+    /* t0 is two words and p8_set_paused() moves it from the host
+     * thread: copy it under the lock so both fields come from the
+     * same update */
+    pthread_mutex_lock(&g_engine->ring_mu);
+    t0 = g_engine->t0;
+    pthread_mutex_unlock(&g_engine->ring_mu);
+    return (double)(ts.tv_sec - t0.tv_sec) +
+           (double)(ts.tv_nsec - t0.tv_nsec) / 1e9;
 }
 
 static void ring_sink(const short *frames, int count, void *ctx)
@@ -198,10 +204,12 @@ void p8_set_paused(P8Engine *e, int paused)
         clock_gettime(CLOCK_MONOTONIC, &now);
         /* shift the pacing origin past the pause, so the guest
          * does not fast-forward to catch up with the wall clock */
+        pthread_mutex_lock(&e->ring_mu);    /* the engine thread reads t0 */
         e->t0.tv_sec += now.tv_sec - pause_begin.tv_sec;
         e->t0.tv_nsec += now.tv_nsec - pause_begin.tv_nsec;
         if (e->t0.tv_nsec >= 1000000000L) { e->t0.tv_nsec -= 1000000000L; e->t0.tv_sec++; }
         if (e->t0.tv_nsec < 0) { e->t0.tv_nsec += 1000000000L; e->t0.tv_sec--; }
+        pthread_mutex_unlock(&e->ring_mu);
         halp8_set_paused(0);
     }
 }

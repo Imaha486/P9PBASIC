@@ -35,6 +35,30 @@ unsigned long vessel_opn_adpcmb_ctl(void);         /* ADPCM-B control writes (di
 unsigned long vessel_opn_class(int lo, int hi);    /* bank-0 write count over a register range */
 unsigned long vessel_opn_rhythm_writes(void);      /* ADPCM-A block writes (diagnostics) */
 
+/* Diagnostic counters frozen at a fixed point of EMULATED time, for
+ * exact regression assertions (tools/embed_test.c): the emulated
+ * clock starts with the session's first machine-code use and does
+ * not depend on host scheduling, unlike a sample taken by the host
+ * thread. vessel_diag_snapshot_at() arms the snapshot (emulated
+ * seconds, 0 = off; the setting survives vessel_session_reset);
+ * vessel_diag_snapshot() returns 1 and fills *out once it was taken.
+ * Read it from another thread only after the engine thread stopped. */
+typedef struct {
+    unsigned long tb_irqs;      /* Timer B interrupts queued with the CPU */
+    unsigned long vrtc_irqs;    /* VRTC interrupts queued with the CPU */
+    unsigned long b0_ssg;       /* bank-0 writes, registers 00-0F */
+    unsigned long b0_rhythm;    /* bank-0 writes, 10-1F (rhythm / ADPCM-A) */
+    unsigned long b0_mode;      /* bank-0 writes, 20-2F (timers, mode, key on/off) */
+    unsigned long b0_fm;        /* bank-0 writes, 30-FF (FM channels 1-3) */
+    unsigned long b0_keyon;     /* bank-0 writes to 28 (key on/off) */
+    unsigned long b0_tb;        /* bank-0 writes to 26 (Timer B = tempo) */
+    unsigned long b1_adpcm;     /* bank-1 writes, 00-2F (ADPCM-B block) */
+    unsigned long b1_fm;        /* bank-1 writes, 30-FF (FM channels 4-6) */
+    unsigned long adpcm_b_reads; /* ADPCM-B DRAM bytes the chip fetched (as rendered so far) */
+} VesselDiag;
+void vessel_diag_snapshot_at(long emu_seconds);
+int  vessel_diag_snapshot(VesselDiag *out);
+
 /* The PC-88 port model, shared by the Z80 and by BASIC's own INP/OUT
  * (the host HAL delegates hal_inp/hal_outp to these). */
 int  vessel_port_in(int port);

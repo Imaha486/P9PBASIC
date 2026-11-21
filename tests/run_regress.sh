@@ -3,6 +3,9 @@
 #
 #   tests/run_regress.sh           build, run all tiers, report PASS/FAIL
 #   tests/run_regress.sh --bless   regenerate the Tier B snapshot baselines
+#   tests/run_regress.sh --pin-counters
+#                                  record the embed audio counters
+#                                  (tests/expected/embed55.counters)
 #
 # The game disk is located through P8P_TEST_DISK (default:
 # ~/workspace/p88test/ma2026/MA2026A.D88). Without it the probe tiers
@@ -13,6 +16,8 @@ cd "$(dirname "$0")/.."
 ROOT=$PWD
 BLESS=0
 [ "${1:-}" = "--bless" ] && BLESS=1
+PIN=0
+[ "${1:-}" = "--pin-counters" ] && PIN=1
 DISK=${P8P_TEST_DISK:-$HOME/workspace/p88test/ma2026/MA2026A.D88}
 FAIL=0
 note() { echo "== $*"; }
@@ -27,7 +32,7 @@ EMBED_OBJS=$(ls build-embed/*.o | grep -v embed_test \
              | grep -v textmerge_test | grep -v window_test \
              | grep -v subsys_test | grep -v dramload_test | grep -v pcmb_ports_test \
              | grep -v kanjifont_test | grep -v gfxmirror_test \
-             | grep -v restart_test)
+             | grep -v restart_test | grep -v d88fix_test)
 unit_test() { # name [args...]
   _t=$1; shift
   cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c "tools/$_t.c" \
@@ -42,6 +47,14 @@ unit_test window_test
 unit_test kanjifont_test
 unit_test pcmb_ports_test
 unit_test gfxmirror_test
+# Disk-layer boundaries on synthetic D88 images built by the test
+# itself (review items C-2 / L-2), so this runs without the game
+# disk: two bundled images, cut-off files, a broken track table, a
+# zero-length sector, an oversized file and a directory entry named
+# "../X", through the sector reader, the XDE natives, the subsystem
+# commands, the file layer and the materializer. A request for an
+# image or drive the file does not hold must FAIL.
+unit_test d88fix_test
 # Token conversion (review items T-4 / T-5), no disk needed.
 # tools/p88conv_test.py checks the Python tools and the C converter
 # (src/p88conv.c standalone driver) against exact text: MBF single /
@@ -227,7 +240,8 @@ fi
 
 note "embed: audio phases (55 s run)"
 rm -rf /tmp/p8p??????
-(cd /tmp && "$ROOT/build-embed/embed_test" "$DISK" 55 > "$WORK/embed55.log" 2>&1)
+(cd /tmp && P8P_COUNTERS_AT=50 "$ROOT/build-embed/embed_test" "$DISK" 55 \
+   > "$WORK/embed55.log" 2>&1)
 D=$(ls -td /tmp/p8p* 2>/dev/null | head -1)
 DR=$(sed -n 's/.*dropped=\([0-9]*\).*/\1/p' "$WORK/embed55.log")
 [ -n "$DR" ] && [ "$DR" -le 20000 ] || bad "embed55: dropped=$DR > 20000"
@@ -238,6 +252,57 @@ else
   bad "embed55: no audio captured"
 fi
 [ $FAIL -eq 0 ] && echo "embed audio ok"
+
+# ---- Embed audio CONTENT (review item C-1). The peak / phase checks
+# above pass with the music at twice its tempo (that bug was caught
+# by ear), so the same 55 s run also freezes the vessel's diagnostic
+# counters at emulated second 50 (P8P_COUNTERS_AT; emulated time, so
+# the values do not depend on host scheduling) and they must equal
+# the pinned values in tests/expected/embed55.counters exactly. What
+# each line pins is written in that file's header (below).
+# Pin them once from a build known to be correct:
+#   tests/run_regress.sh --pin-counters
+# and review the diff like a baseline; --bless does not touch them.
+CNT=tests/expected/embed55.counters
+grep '^counter ' "$WORK/embed55.log" > "$WORK/embed55.counters"
+if ! grep -q '^counter tb_irqs=' "$WORK/embed55.counters"; then
+  bad "embed55: no counter snapshot (emulated second 50 not reached in 55 s)"
+elif [ $PIN -eq 1 ]; then
+  {
+    cat <<'EOF'
+# Embed audio tier, 55 s MA2026 run: vessel diagnostic counters at
+# emulated second 50 (tests/run_regress.sh, review item C-1).
+# Written by tests/run_regress.sh --pin-counters; exact match required.
+#   tb_irqs        Timer B interrupt vectors queued = sequencer ticks:
+#                  the tempo (a 2x-tempo build doubles it)
+#   vrtc_irqs      VRTC interrupt vectors queued: the 60 Hz cadence and
+#                  the VSYNC mask / priority handling
+#   b0_ssg         bank-0 writes 00-0F: the SSG parts
+#   b0_rhythm      bank-0 writes 10-1F: the rhythm (ADPCM-A) part
+#   b0_mode        bank-0 writes 20-2F: timer control, acknowledges,
+#                  key on/off
+#   b0_fm          bank-0 writes 30-FF: FM channels 1-3 (tone, volume,
+#                  pitch)
+#   b0_keyon       bank-0 writes to 28: FM notes started / stopped
+#   b0_tb          bank-0 writes to 26: tempo settings
+#   b1_adpcm       bank-1 writes 00-2F: the ADPCM-B (PCM) part's
+#                  registers, through PMD's AC/AD port pair
+#   b1_fm          bank-1 writes 30-FF: FM channels 4-6
+#   adpcm_b_reads  sample bytes the chip fetched from the ADPCM-B DRAM:
+#                  PCM actually played from the loaded block
+EOF
+    cat "$WORK/embed55.counters"
+  } > "$CNT"
+  echo "counters pinned:"; cat "$WORK/embed55.counters"
+elif [ -f "$CNT" ]; then
+  if ! grep -v '^#' "$CNT" | diff -u - "$WORK/embed55.counters"; then
+    bad "embed55: diagnostic counters differ from $CNT (diff above)"
+  else
+    echo "embed counters ok"
+  fi
+else
+  bad "embed55: $CNT is missing -- the counter baseline ships with the suite and must be present (re-pin with: tests/run_regress.sh --pin-counters)"
+fi
 
 # The merged text surface: hold RETURN during attract to enter
 # *SELECT (SCREEN 0,2, list + help printed by the interpreter),

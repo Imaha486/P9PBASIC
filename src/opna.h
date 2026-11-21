@@ -15,6 +15,14 @@ extern "C" {
 
 void opna_write(int bank, int addr, int value);
 int  opna_status_hi(void);   /* extended status (ADPCM-B flags) */
+/* Bank-1 data-port read with register `addr` selected: the ADPCM-B
+ * memory read (register 08H, external-memory read mode; the chip
+ * consumes two dummy reads after a start), 0 for every other
+ * register and while the chip is inert (no WAV / sink). */
+int  opna_data_hi(int addr);
+/* Bytes the chip has fetched from the ADPCM-B DRAM since opna_reset()
+ * (playback and data-port reads; diagnostics). */
+unsigned long opna_adpcm_b_ext_reads(void);
 void opna_advance(long cpu_cycles);
 /* Write / read one byte of the OPNA's ADPCM-B sample DRAM (256 KiB,
  * the Sound Board II's only writable sample memory). FFDE service 1

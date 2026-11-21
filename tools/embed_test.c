@@ -130,6 +130,11 @@ int main(int argc, char **argv)
     secs = atoi(argv[2]);
     keys = argc > 3 ? argv[3] : "";
     memset(shadow_rows, 0xFF, sizeof(shadow_rows));
+    /* P8P_COUNTERS_AT=<emulated seconds>: freeze the vessel's
+     * diagnostic counters at that point of emulated time and print
+     * them after the run (the "counter" lines below). */
+    if (getenv("P8P_COUNTERS_AT"))
+        vessel_diag_snapshot_at(atol(getenv("P8P_COUNTERS_AT")));
     e = p8_create(argv[1]);
     if (!e) { fprintf(stderr, "create failed\n"); return 1; }
     if (p8_boot(e) != 0) { fprintf(stderr, "boot failed\n"); return 1; }
@@ -236,6 +241,25 @@ int main(int argc, char **argv)
     dump_ppm(e, "embed_gfx.ppm");
     wav_write("embed_audio.wav", drain, got);
     p8_stop(e);
+    /* after the stop: the engine thread wrote the snapshot */
+    if (getenv("P8P_COUNTERS_AT")) {
+        VesselDiag d;
+        if (vessel_diag_snapshot(&d)) {
+            printf("counter tb_irqs=%lu\n", d.tb_irqs);
+            printf("counter vrtc_irqs=%lu\n", d.vrtc_irqs);
+            printf("counter b0_ssg=%lu\n", d.b0_ssg);
+            printf("counter b0_rhythm=%lu\n", d.b0_rhythm);
+            printf("counter b0_mode=%lu\n", d.b0_mode);
+            printf("counter b0_fm=%lu\n", d.b0_fm);
+            printf("counter b0_keyon=%lu\n", d.b0_keyon);
+            printf("counter b0_tb=%lu\n", d.b0_tb);
+            printf("counter b1_adpcm=%lu\n", d.b1_adpcm);
+            printf("counter b1_fm=%lu\n", d.b1_fm);
+            printf("counter adpcm_b_reads=%lu\n", d.adpcm_b_reads);
+        } else {
+            printf("counter snapshot not reached\n");
+        }
+    }
     p8_destroy(e);
     return 0;
 }

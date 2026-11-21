@@ -330,6 +330,21 @@ extern "C" int opna_status_hi(void)
     return chip.read_status_hi();
 }
 
+extern "C" int opna_data_hi(int addr)
+{
+    if (!ensure_init()) return 0;
+    render_pending();           /* a memory read moves the chip's address */
+    /* The vessel keeps the address latch and forwards writes as
+     * address + data pairs, so the chip's own latch is set here. */
+    chip.write_address_hi((uint8_t)addr);
+    return chip.read_data_hi();
+}
+
+extern "C" unsigned long opna_adpcm_b_ext_reads(void)
+{
+    return g_ext_reads_b;
+}
+
 extern "C" void opna_advance(long cpu_cycles)
 {
     if (!ensure_init()) return;
