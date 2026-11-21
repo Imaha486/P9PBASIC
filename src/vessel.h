@@ -25,6 +25,7 @@ void vessel_set_palette(int idx, int r7, int g7, int b7); /* components 0..7 */
 int  vessel_disk_read(int img, int ltrack, int sector, int count, unsigned addr);
 int  vessel_dram_load(int img, int ltrack, int tracks); /* FFDE services 0/1: raw sector reads from P8P_DISK (img = bundled disk image index) */
 void vessel_notify_load(unsigned addr, long len);  /* called after BLOAD loads a block */
+int  vessel_relay_target(unsigned vector, const char *name, unsigned *target); /* extension-statement handler from the EEA vector's JP (0xEEA1/4/7); 0 = not hooked (warns once per vector per session) */
 void vessel_prime_arg(long v);  /* plant the first-arg descriptor (EC41/EC44) as the ROM dispatcher would */
 void vessel_pump(void);                            /* advance emulated time + deliver due interrupts (call while BASIC runs) */
 unsigned long vessel_opn_keyons(void);             /* OPNA key on/off write count (diagnostics) */

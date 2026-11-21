@@ -40,6 +40,59 @@ static int inited = 0;
 static int pump_live = 0;   /* set by the session's first vessel_init() call */
 static int vtrace = -1;
 static int pmd_loaded = 0;
+
+/* NEOMSC detection (docs/APPROXIMATIONS.md item 25). The traps that
+ * are only valid for NEOMSC and its bundled PMD - the 0xA794 argument
+ * fetch and the "PMD not loaded yet" RET-only range - are armed only
+ * while neomsc_loaded is set; any other title's (or a user's own)
+ * machine code at those addresses runs as written.
+ *
+ * NEOMSC counts as present when a load was announced
+ * (vessel_notify_load) that covers exactly NEOMSC's BSAVE header
+ * range, 0x9900-0xA95E, and the body's first bytes in guest memory
+ * equal neomsc_sig. Only BLOAD can announce that range: the other
+ * announcer, vessel_disk_read, loads whole 256-byte sectors and
+ * 0x105F is not a multiple of 256.
+ *
+ * The signature is the first 30 bytes of the body on the MA2026 disk
+ * (the file's bytes 4..33), which are NEOMSC's whole hook
+ * installation:
+ *   F3          DI
+ *   3E C3       LD A,0C3h            ; JP opcode
+ *   32 A1 EE    LD (0EEA1h),A        ; FFDD vector
+ *   32 A4 EE    LD (0EEA4h),A        ; FFDE vector
+ *   32 A7 EE    LD (0EEA7h),A        ; FFDF vector
+ *   21 4D 99    LD HL,0994Dh         ; FFDE handler
+ *   22 A5 EE    LD (0EEA5h),HL
+ *   21 5C 9E    LD HL,09E5Ch         ; FFDD handler
+ *   22 A2 EE    LD (0EEA2h),HL
+ *   21 DB A6    LD HL,0A6DBh         ; FFDF handler
+ *   22 A8 EE    LD (0EEA8h),HL
+ * It is discriminating because it carries the three handler addresses
+ * as absolute operands: a body that matches plants exactly the
+ * handlers of docs/NEOMSC-CONTRACT.md, which is the layout the gated
+ * traps assume (0xA794 is an address inside that layout). Other code
+ * hooking the same three vectors would have to place its handlers at
+ * the same three addresses, in the same order, in a body of the same
+ * length, to match.
+ *
+ * The predicate fingerprints the BLOAD operation, not the memory
+ * contents: every announced load that overlaps the body range
+ * re-evaluates it (vessel_notify_load) - the matching load sets the
+ * flag, any other overlapping load clears it, since the body is no
+ * longer intact. Loads elsewhere leave it alone, and so do writes
+ * that are never announced (POKE, guest code): a body assembled or
+ * patched that way is not tracked. vessel_session_reset clears it. */
+#define NEOMSC_START 0x9900u
+#define NEOMSC_END   0xA95Eu
+static const unsigned char neomsc_sig[30] = {
+    0xF3, 0x3E, 0xC3, 0x32, 0xA1, 0xEE, 0x32, 0xA4, 0xEE, 0x32,
+    0xA7, 0xEE, 0x21, 0x4D, 0x99, 0x22, 0xA5, 0xEE, 0x21, 0x5C,
+    0x9E, 0x22, 0xA2, 0xEE, 0x21, 0xDB, 0xA6, 0x22, 0xA8, 0xEE
+};
+static int neomsc_loaded = 0;
+static unsigned char relay_warned = 0;  /* bit per EEA vector, see vessel_relay_target */
+
 static unsigned char rom_seen[0x8000 / 8];
 static unsigned char pmd_seen[(PMD_END - PMD_START + 1 + 7) / 8];
 static unsigned char in_seen[256 / 8], out_seen[256 / 8];
@@ -50,7 +103,7 @@ static int tracing(void)
     return vtrace;
 }
 
-/* P8P_TRACE_SP, read once: the run loop tests it on every step. */
+/* P8P_TRACE_SP, read once (the run loop samples it once per call). */
 static int trace_sp(void)
 {
     static int v = -1;
@@ -1023,7 +1076,10 @@ static int trap(void)
         emu_ret();
         return 1;
     }
-    if (pc == 0xA794) {     /* NEOMSC's argument fetch: the in-image
+    if (pc == 0xA794 && neomsc_loaded) {
+                            /* NEOMSC's argument fetch (armed only with
+                             * NEOMSC detected; otherwise whatever code
+                             * lives here runs as written): the in-image
                              * routine here chains into ROM evaluators
                              * (0x11D3 / 0x1B9D) that the vessel cannot run,
                              * so the fetch is emulated from the RST 8
@@ -1049,7 +1105,11 @@ static int trap(void)
         emu_ret();
         return 1;
     }
-    if (pc >= PMD_START && pc <= PMD_END && !pmd_loaded) {
+    /* NEOMSC calls PMD's entries (0xAA00..) whether or not the program
+     * has loaded PMD yet; until a load spanning 0xAA00 is announced
+     * the range answers with a plain RET. Without NEOMSC detected the
+     * range is ordinary memory and executes as written. */
+    if (neomsc_loaded && pc >= PMD_START && pc <= PMD_END && !pmd_loaded) {
         if (tracing() && first_time(pmd_seen, pc - PMD_START)) fprintf(stderr, "VESSEL PMD %04X not loaded, skipped\n", pc);
         emu_ret();
         return 1;
@@ -1249,6 +1309,8 @@ void vessel_init(void)
 void vessel_session_reset(void)
 {
     pmd_loaded = 0;
+    neomsc_loaded = 0;
+    relay_warned = 0;
     /* disk subsystem command processor */
     oq_head = oq_count = 0;
     read_len = 0; read_valid = 0;
@@ -1365,30 +1427,40 @@ static int halt_wait(void)
     return 1;
 }
 
+/* P8P_TRACE_SP diagnostics for the instruction about to execute; the
+ * run loop calls this only with that trace on, so none of it - the
+ * NEOMSC stack checkpoints (CG loader 0xA4A9 / 0xA4D6 / 0xA4EA /
+ * 0xA566; 0x8F03 from the same investigation), the recent-PC ring
+ * and the OPN-handler entry detection - costs anything otherwise. */
+static void trace_sp_step(void)
+{
+    unsigned h;
+    if (cpu.pc == 0xA4A9 || cpu.pc == 0xA4EA
+        || cpu.pc == 0xA566 || cpu.pc == 0xA4D6 || cpu.pc == 0x8F03)
+        fprintf(stderr, "SPCHK pc=%04X sp=%04X top=%04X iy=%04X\n",
+                (unsigned)cpu.pc, (unsigned)cpu.sp, rd16(cpu.sp),
+                (unsigned)cpu.iy);
+    pc_ring[pc_ring_pos & 63] = (unsigned short)cpu.pc; pc_ring_pos++;
+    h = rd16((IRQ_PAGE << 8) | OPN_VEC);
+    if (cpu.pc == h && h >= 0x8000 && pc_ring_pos >= 2
+        && pc_ring[(pc_ring_pos - 2) & 63] != (unsigned short)h)
+        fprintf(stderr, "IRQACPT from=%04X bank=%d alu=%d\n",
+                pc_ring[(pc_ring_pos - 2) & 63], mem_bank, vram_way());
+}
+
 static long run_loop_body(void)
 {
     long n;
     int t;
     int steps = getenv("P8P_TRACE_STEPS") != 0;
+    int tsp = trace_sp();
     last_cyc = cpu.cyc;
     for (n = 0; n < STEP_CAP; n++) {
         t = trap();
         if (t < 0) return n;
         if (t > 0) continue;
         if (steps) fprintf(stderr, "STEP %04X %02X SP=%04X\n", (unsigned)cpu.pc, hal_peek(0, cpu.pc), (unsigned)cpu.sp);
-        if (trace_sp() && (cpu.pc == 0xA4A9 || cpu.pc == 0xA4EA
-            || cpu.pc == 0xA566 || cpu.pc == 0xA4D6 || cpu.pc == 0x8F03))
-            fprintf(stderr, "SPCHK pc=%04X sp=%04X top=%04X iy=%04X\n",
-                    (unsigned)cpu.pc, (unsigned)cpu.sp, rd16(cpu.sp),
-                    (unsigned)cpu.iy);
-        pc_ring[pc_ring_pos & 63] = (unsigned short)cpu.pc; pc_ring_pos++;
-        if (trace_sp()) {
-            unsigned h = rd16((IRQ_PAGE << 8) | OPN_VEC);
-            if (cpu.pc == h && h >= 0x8000 && pc_ring_pos >= 2
-                && pc_ring[(pc_ring_pos - 2) & 63] != (unsigned short)h)
-                fprintf(stderr, "IRQACPT from=%04X bank=%d alu=%d\n",
-                        pc_ring[(pc_ring_pos - 2) & 63], mem_bank, vram_way());
-        }
+        if (tsp) trace_sp_step();
         cpu_step();
         if (cpu.halted) {
             if (!halt_wait()) {
@@ -1663,5 +1735,47 @@ void vessel_notify_load(unsigned addr, long len)
 {
     addr &= 0xFFFF;
     if (len > 0 && addr <= PMD_START && (long)addr + len > (long)PMD_START) pmd_loaded = 1;
-    if (tracing()) fprintf(stderr, "VESSEL load %04X len %ld%s\n", addr, len, pmd_loaded ? " (PMD loaded)" : "");
+    /* NEOMSC detection: see the predicate's description at neomsc_sig. */
+    if (len > 0 && addr <= NEOMSC_END && (long)addr + len > (long)NEOMSC_START) {
+        unsigned k = 0;
+        if (addr == NEOMSC_START && len == (long)(NEOMSC_END - NEOMSC_START + 1))
+            for (; k < sizeof(neomsc_sig); k++)
+                if (hal_peek(0, NEOMSC_START + k) != neomsc_sig[k]) break;
+        neomsc_loaded = (k == sizeof(neomsc_sig));
+    }
+    if (tracing()) fprintf(stderr, "VESSEL load %04X len %ld%s%s\n", addr, len,
+                           pmd_loaded ? " (PMD loaded)" : "",
+                           neomsc_loaded ? " (NEOMSC detected)" : "");
+}
+
+/* Resolve an extension-statement relay: the statement's handler is
+ * whatever the guest planted in its EEA vector (0xEEA1 FFDD, 0xEEA4
+ * FFDE, 0xEEA7 FFDF), so the target is read from the vector's JP
+ * instead of being assumed. Returns 1 with *target set when the
+ * vector holds JP nn (0xC3) to RAM (nn >= 0x8000). That is a RAM-only
+ * policy: the vessel carries no ROM image, only native stand-ins for
+ * a few specific ROM entries, so a vector aimed below 0x8000 is not
+ * treated as a handler; the all-ones sentinel address cannot be one
+ * either. Otherwise returns 0 and the caller
+ * makes the statement a no-op for this call; the first failure per
+ * vector in a session is reported on stderr even with tracing off, so
+ * an unhooked statement does not fail silently. `name` is the
+ * statement's name for that message. */
+int vessel_relay_target(unsigned vector, const char *name, unsigned *target)
+{
+    unsigned t = rd16(vector + 1);
+    unsigned char bit;
+    if (hal_peek(0, vector & 0xFFFF) == 0xC3 && t >= 0x8000 && t != SENTINEL) {
+        *target = t;
+        return 1;
+    }
+    bit = (unsigned char)(vector == 0xEEA1 ? 1 : vector == 0xEEA4 ? 2 : 4);
+    if (!(relay_warned & bit)) {
+        relay_warned |= bit;
+        fprintf(stderr, "VESSEL %s: no handler hooked at vector %04X"
+                " (bytes %02X %02X %02X), statement ignored\n",
+                name, vector & 0xFFFF, hal_peek(0, vector & 0xFFFF),
+                t & 0xFF, t >> 8);
+    }
+    return 0;
 }

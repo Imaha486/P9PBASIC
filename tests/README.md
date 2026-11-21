@@ -28,8 +28,17 @@ the image itself.
   pointers, XDD 8 completion, the playback wait loop, the CG path,
   and standalone-song audio (PROBE5/51/52 must be loud and continuous
   from the first seconds — the disk-image regression of 2026-11-18
-  made exactly these play the wrong data). A failure here means the
-  behaviour is *wrong*, not merely different.
+  made exactly these play the wrong data). PROBE54/PROBE55 are the
+  two probes that do NOT load NEOMSC: they check that code at 0xAB00
+  and at 0xA794 runs as written when no NEOMSC was detected
+  (docs/APPROXIMATIONS.md item 25). They run their routine with
+  BSAVE + `BLOAD ...,R`, because `CALL` does not reach the vessel in
+  the host HAL. PROBE56 plants a register recorder at each EEA vector
+  and checks the relays' entry registers against the contract
+  (A / BC / HL for XDF and XDD, A / BC for XDE); PROBE57 checks that
+  a notified load over the NEOMSC body disarms the NEOMSC-only traps.
+  A failure here means the behaviour is *wrong*, not
+  merely different.
 - **Tier B (characterization snapshots)** — the final screen of every
   probe in `tests/probes/` compared against `tests/expected/`. These
   baselines record what the code does today; they are not proofs of

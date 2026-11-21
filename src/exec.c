@@ -1462,28 +1462,41 @@ static void stmt_ext(int which)
     }
     if (tr) fputc('\n', stderr);
 
-    if (which == 0 && nnum >= 1 && hal_peek(0, 0x9E5C) == 0xCD) {
-        /* XDD: relay to NEOMSC's FFDD handler (the EEA1 vector's
-         * target, 0x9E5C; BC = the vector address, HL = the first
-         * argument token, A = that token's byte — the convention the
-         * genuine interpreter uses, verified against QUASI88). */
-        unsigned hl = ext_build_stream(0xDD, nums, arg_is_str,
-                                       arg_str, arg_slen, nnum, arg_sep);
-        vessel_prime_arg(nums[0]);
-        vessel_call(0x9E5C, (unsigned)hal_peek(0, hl), hl, 0xEEA1, 0);
-    } else if (which == 2 && cmd[0] && hal_peek(0, 0xA6DB) == 0x7E) {
-        /* XDF: relay to NEOMSC's FFDF handler (HL = command letter).
-         * The handler sits at 0xA6DB with NEOMSC loaded at its BSAVE
-         * header address 0x9900 (it was 0xA5DF in the old layout). */
-        unsigned p = EXT_STREAM, i;
-        p = ext_put(p, 0xFF); p = ext_put(p, 0xDF); p = ext_put(p, 0x20);
-        for (i = 0; cmd[i]; i++) p = ext_put(p, (unsigned char)cmd[i]);
-        for (n = 0; n < nnum; n++) {
-            p = ext_put(p, 0x2C);
-            p = ext_put_num(p, nums[n]);
+    /* The relays jump to whatever handler the guest hooked into the
+     * statement's EEA vector (vessel_relay_target reads the vector's
+     * JP), as the genuine interpreter does. With no handler hooked
+     * the statement does nothing for this call, and the vessel says
+     * so on stderr once per vector. For NEOMSC the targets are
+     * 0x9E5C / 0x994D / 0xA6DB (docs/NEOMSC-CONTRACT.md). */
+    if (which == 0 && nnum >= 1) {
+        /* XDD: relay to the FFDD handler (the EEA1 vector's target;
+         * BC = the vector address, HL = the first argument token,
+         * A = that token's byte — the convention the genuine
+         * interpreter uses, verified against QUASI88). */
+        unsigned target;
+        if (vessel_relay_target(0xEEA1, nm[0], &target)) {
+            unsigned hl = ext_build_stream(0xDD, nums, arg_is_str,
+                                           arg_str, arg_slen, nnum, arg_sep);
+            vessel_prime_arg(nums[0]);
+            vessel_call(target, (unsigned)hal_peek(0, hl), hl, 0xEEA1, 0);
         }
-        ext_put(p, 0x00);
-        vessel_call(0xA6DB, 0, EXT_STREAM + 3, EXT_STREAM, 0);
+    } else if (which == 2 && cmd[0]) {
+        /* XDF: relay to the FFDF handler (the EEA7 vector's target;
+         * BC = the vector address, HL = the command letter, A = that
+         * letter — docs/NEOMSC-CONTRACT.md. Stock NEOMSC reloads A
+         * from (HL), but a handler dispatching on A needs it). */
+        unsigned target;
+        if (vessel_relay_target(0xEEA7, nm[2], &target)) {
+            unsigned p = EXT_STREAM, i;
+            p = ext_put(p, 0xFF); p = ext_put(p, 0xDF); p = ext_put(p, 0x20);
+            for (i = 0; cmd[i]; i++) p = ext_put(p, (unsigned char)cmd[i]);
+            for (n = 0; n < nnum; n++) {
+                p = ext_put(p, 0x2C);
+                p = ext_put_num(p, nums[n]);
+            }
+            ext_put(p, 0x00);
+            vessel_call(target, (unsigned char)cmd[0], EXT_STREAM + 3, 0xEEA7, 0);
+        }
     } else if (which == 1 && nnum >= 1) {
         /* XDE services with statement-level equivalents in the
          * vessel: 0 = raw sector read into guest memory, 1 = the
@@ -1500,14 +1513,22 @@ static void stmt_ext(int which)
                              (int)nums[4], (unsigned)(nums[5] & 0xFFFF));
         else if (nums[0] == 1 && nnum >= 4)
             vessel_dram_load((int)nums[1], (int)nums[2], (int)nums[3]);
-        else if (hal_peek(0, 0x994D) == 0xCD) {
+        else {
             /* Other XDE services (2 = DRAM copy, 3 = staff roll):
-             * relay to NEOMSC's FFDE handler (the EEA4 vector's
-             * target, 0x994D; same entry convention as XDD). */
-            unsigned hl = ext_build_stream(0xDE, nums, arg_is_str,
-                                           arg_str, arg_slen, nnum, arg_sep);
-            vessel_prime_arg(nums[0]);
-            vessel_call(0x994D, (unsigned)hal_peek(0, hl), hl, 0xEEA4, 0);
+             * relay to the FFDE handler (the EEA4 vector's target;
+             * BC = the vector address, A = the first argument's
+             * token byte). HL deliberately differs from the genuine
+             * entry value 0xE69C: the vessel has no ROM text pointer
+             * of its own, so the RST 8 svc 0x2C / 0x11D3 traps parse
+             * the following arguments from HL, which therefore has to
+             * point at the first argument token as for XDD. */
+            unsigned target;
+            if (vessel_relay_target(0xEEA4, nm[1], &target)) {
+                unsigned hl = ext_build_stream(0xDE, nums, arg_is_str,
+                                               arg_str, arg_slen, nnum, arg_sep);
+                vessel_prime_arg(nums[0]);
+                vessel_call(target, (unsigned)hal_peek(0, hl), hl, 0xEEA4, 0);
+            }
         }
     }
 }

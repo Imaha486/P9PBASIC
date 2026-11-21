@@ -111,6 +111,39 @@ img=$(printf '%s\n' "$out" | grep -o 'img *[0-9]*' | grep -o '[0-9]*$')
 if [ "$img" != "384" ]; then
   bad "PROBE53: text image count ${img:-none} != 384 (staff roll render changed)"
 fi
+# PROBE54 / PROBE55: the NEOMSC-only traps must stay disarmed when no
+# NEOMSC was BLOADed (docs/APPROXIMATIONS.md item 25). Neither probe
+# loads NEOMSC; each POKEs a tiny routine, BSAVEs it and runs it with
+# BLOAD ,R (CALL does not reach the vessel in the host HAL).
+# PROBE54: a counter routine at 0xAB00, run twice -> the cell reads 2
+# (with the "PMD not loaded" RET-only range armed it stayed 0).
+# PROBE55: a routine at 0xA794 that stores DE=0x1234 and bumps a
+# counter -> 1, 0x34, 0x12 (with the argument-fetch trap armed the
+# routine was replaced by a DE rewrite + RET and all three stayed 0).
+out=$(run_probe PROBE54) || bad "PROBE54 exit"
+printf '%s\n' "$out" | grep -q '^00|ab00 ran 2$' || bad "PROBE54: code at 0xAB00 did not run without NEOMSC"
+out=$(run_probe PROBE55) || bad "PROBE55 exit"
+printf '%s\n' "$out" | grep -q '^00|a794 ran 1  52  18$' || bad "PROBE55: code at 0xA794 did not run as written without NEOMSC"
+# PROBE56: entry registers of the statement relays, seen by a custom
+# handler (no NEOMSC): a recorder at 0x9810 stores A, BC, HL and the
+# byte at (HL); a JP to it is planted at each EEA vector in turn.
+# Printed as A B C H L (HL). Per docs/NEOMSC-CONTRACT.md: BC = the
+# vector address (0xEEA7 / 0xEEA1 / 0xEEA4), A = the command letter
+# ('R' = 82) for XDF and the first argument's token byte for XDD/XDE
+# (digit tokens 5 -> 0x16, 3 -> 0x14), HL = the address of that byte
+# in the relay's stream (0x8F03). For XDE only A and BC are asserted:
+# the genuine HL there is 0xE69C, a deviation the vessel keeps on
+# purpose (see stmt_ext); the Tier B snapshot still records it.
+out=$(run_probe PROBE56) || bad "PROBE56 exit"
+printf '%s\n' "$out" | grep -q '^00|xdf 82  238  167  143  3  82$' || bad "PROBE56: XDF entry registers != A='R' BC=EEA7 HL->'R'"
+printf '%s\n' "$out" | grep -q '^01|xdd 22  238  161  143  3  22$' || bad "PROBE56: XDD entry registers != A=token BC=EEA1 HL->token"
+printf '%s\n' "$out" | grep -q '^02|xde 20  238  164 ' || bad "PROBE56: XDE entry registers != A=token BC=EEA4"
+# PROBE57: a notified load that overlaps the NEOMSC body without being
+# the NEOMSC load disarms the NEOMSC traps: NEOMSC is BLOADed (traps
+# armed), then PROBE55's routine is BLOADed over 0xA794 and must run
+# as written (with the detection left armed all three cells stay 0).
+out=$(run_probe PROBE57) || bad "PROBE57 exit"
+printf '%s\n' "$out" | grep -q '^00|a794 ran 1  52  18$' || bad "PROBE57: overlapping load did not disarm the 0xA794 trap"
 [ $FAIL -eq 0 ] && echo "Tier A ok"
 
 note "Tier A audio (standalone songs must be loud from the start)"
