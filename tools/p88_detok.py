@@ -5,7 +5,8 @@ from MA2026A.D88) into readable text. Work-in-progress RE tool, 2026-11-17.
 Format (reverse-engineered from the actual files):
   line = [link u16 LE = file offset of next line][lineno u16 LE][body][0x00]
   The link sometimes drifts by 1 from the true next offset, so the parser
-  searches link-2..link+2 for a plausible next header.
+  searches link-2..link+2 for a plausible next header. The last line is
+  framed by its own link too (it points at the 00 00 end marker).
   body = MS-BASIC-style tokens (GW-BASIC order, PC-88 extensions in C0-FE),
          plain-ASCII variable names, string literals raw (Shift_JIS).
   numbers: 0B=&O+u16 0C=&H+u16 0E=line-ref u16 0F=int8 11-1A=digits 0-9
@@ -35,37 +36,132 @@ FUNC = {
 OPS = {0xF0:'>',0xF1:'=',0xF2:'<',0xF3:'+',0xF4:'-',0xF5:'*',0xF6:'/',0xF7:'^',
        0xF8:'AND',0xF9:'OR',0xFA:'XOR',0xFB:'EQV',0xFC:'IMP',0xFD:'MOD',0xFE:'\\'}
 
+# MBF numbers are sign * 0.1fff...(binary) * 2^(exp-128): the mantissa is a
+# fraction in [0.5, 1) whose leading 1 is implied (its bit position holds the
+# sign instead), and exp == 0 means zero. 1.0 is exponent 0x81 with an
+# all-zero stored mantissa. src/p88conv.c mirrors both functions.
+
+# Spelling of numeric constants. The text is read back by the interpreter,
+# whose parser (src/num.c str_to_num) takes the type from the spelling:
+#   suffix % / ! / #        -> integer / single / double
+#   exponent letter D       -> double
+#   exponent letter E       -> single
+#   no '.', value <= 32767  -> integer
+#   more than 7 digits      -> double   (digits counted without leading zeros)
+#   otherwise               -> single
+# and a single literal above 1.70141E+38 is an Overflow error. The digits
+# are Python's repr() of the value (shortest string that reads back to the
+# same binary64), so the value read back is exact; the letter / suffix is
+# chosen so the type read back is the token's type:
+#   single: plain form as is when it has <= 7 digits, else with '!';
+#           exponent form with 'E'; above the literal limit the exact
+#           single product (half*2), which the interpreter's single
+#           multiply does not range-check.
+#   double: plain form as is when it has > 7 digits, else with '#';
+#           exponent form with 'D'.
+# Negative constants are parenthesized: the interpreter's unary minus binds
+# looser than '^', so a bare "-2.5^2" would read as -(2.5^2).
+# src/p88conv.c (put_num_literal / put_int16) mirrors this byte for byte.
+
+SNG_LITERAL_MAX = 1.70141e38    # src/num.c: larger single literals overflow
+
+def _typed(a, dbl):
+    """Spelling of the positive float a that reads back as a single
+    (dbl false) or a double (dbl true) with exactly this value."""
+    r = repr(a)
+    if 'e' in r:
+        return r.replace('e', 'D' if dbl else 'E')
+    nd = len(r.replace('.', '').lstrip('0'))    # the parser's digit count
+    if dbl:
+        return r if nd > 7 else r + '#'
+    return r if nd <= 7 else r + '!'
+
+def num_literal(v, dbl):
+    """Typed literal text for the nonzero finite float v."""
+    a = abs(v)
+    if not dbl and a > SNG_LITERAL_MAX:
+        s = '(' + _typed(a / 2, False) + '*2)'
+    else:
+        s = _typed(a, dbl)
+    return '(-' + s + ')' if v < 0 else s
+
+def int_literal(v):
+    """Text of a signed 16-bit integer constant. -32768 has no integer
+    literal (32768 reads as a single), so it is spelled as integer
+    arithmetic that stays integer."""
+    if v >= 0: return str(v)
+    if v == -32768: return '(-32767-1)'
+    return f'({v})'
+
 def mbf_single(b):
+    """[m0][m1][m2: sign|m2][exp], 24-bit mantissa, hidden bit at bit 23:
+    value = sign * bits * 2^(exp-128-24) = sign * (1 + frac/2^23) * 2^(exp-129)."""
     if len(b) < 4: return '?'
     exp = b[3]
-    if exp == 0: return '0'
-    bits = (b[0] | (b[1] << 8) | (b[2] << 16) | (0x80 << 24))
-    return repr(bits * (2.0 ** (exp - 127 - 24)))
+    if exp == 0: return '0!'
+    sign = -1.0 if (b[2] & 0x80) else 1.0
+    bits = b[0] | (b[1] << 8) | ((b[2] & 0x7F) << 16) | (1 << 23)
+    return num_literal(sign * bits * (2.0 ** (exp - 128 - 24)), False)
+
+def mbf_double(b):
+    """[m0..m5][m6: sign|m6][exp], 56-bit mantissa, hidden bit at bit 55:
+    value = sign * bits * 2^(exp-128-56). The 56-bit mantissa is rounded
+    (half to even) to the 53 bits of a binary64, the interpreter's own
+    double type; see docs/TOKEN-FORMAT.md."""
+    if len(b) < 8: return '?'
+    exp = b[7]
+    if exp == 0: return '0#'
+    sign = -1.0 if (b[6] & 0x80) else 1.0
+    frac = (b[6] & 0x7F) << 48 | b[5] << 40 | b[4] << 32 | b[3] << 24 \
+        | b[2] << 16 | b[1] << 8 | b[0]
+    bits = frac | (1 << 55)
+    return num_literal(sign * bits * (2.0 ** (exp - 128 - 56)), True)
+
+LINK_PROBES = (0, -1, 1, -2, 2)
+
+def last_line_end(d, off, link):
+    """End (exclusive) of the body of the last line, whose body starts at
+    off. The line's own link field points just past its 00 terminator, at
+    the 00 00 end-of-program marker, so the body ends at link-1; number
+    payloads may contain 00 bytes, so the body is never scanned for one.
+    The link drifts like any other (see parse_lines), hence the probes:
+    first a terminator followed by the end marker, then (file cut short
+    after the terminator) a terminator alone. Only when the link leads
+    nowhere does the first 00 decide."""
+    for delta in LINK_PROBES:
+        cand = link + delta
+        if cand < off + 1 or cand + 2 > len(d): continue
+        if d[cand-1] == 0 and d[cand] == 0 and d[cand+1] == 0:
+            return cand - 1
+    for delta in LINK_PROBES:
+        cand = link + delta
+        if cand < off + 1 or cand > len(d): continue
+        if d[cand-1] == 0:
+            return cand - 1
+    end = d.find(b'\x00', off)
+    return end if end >= 0 else len(d)
 
 def parse_lines(d):
     lines = []
     p = 0
-    prev_no = -1
     while p + 4 <= len(d):
         link, no = struct.unpack_from('<HH', d, p)
         if link == 0 or no == 0: break
         # find next line start near link
         nxt = None
-        for cand in (link, link-1, link+1, link-2, link+2):
+        for delta in LINK_PROBES:
+            cand = link + delta
             if cand <= p + 4 or cand + 4 > len(d): continue
             l2, n2 = struct.unpack_from('<HH', d, cand)
             if no < n2 < no + 2000 and l2 > cand:
                 nxt = cand; break
         if nxt is None:
-            # last line: body runs to first 00 after p+4 (best effort)
-            end = d.find(b'\x00', p+4)
-            nxt = (end + 1) if end >= 0 else len(d)
-            lines.append((no, d[p+4:nxt]))
+            # last line: framed by its own link, terminator excluded
+            lines.append((no, d[p+4:last_line_end(d, p + 4, link)]))
             break
         body = d[p+4:nxt]
         if body.endswith(b'\x00'): body = body[:-1]
         lines.append((no, body))
-        prev_no = no
         p = nxt
     return lines
 
@@ -102,11 +198,11 @@ def detok(body):
         if 0x11 <= b <= 0x1A:
             out.append(str(b - 0x11)); i += 1; continue
         if b == 0x1C:
-            v = struct.unpack_from('<h', body, i+1)[0]; out.append(str(v)); i += 3; continue
+            v = struct.unpack_from('<h', body, i+1)[0]; out.append(int_literal(v)); i += 3; continue
         if b == 0x1D:
             out.append(mbf_single(body[i+1:i+5])); i += 5; continue
         if b == 0x1F:
-            out.append('<DBL>'); i += 9; continue
+            out.append(mbf_double(body[i+1:i+9])); i += 9; continue
         if b == 0xFF:
             t = body[i+1]
             if t in FUNC: out.append(FUNC[t])

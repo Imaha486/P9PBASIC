@@ -42,6 +42,27 @@ unit_test window_test
 unit_test kanjifont_test
 unit_test pcmb_ports_test
 unit_test gfxmirror_test
+# Token conversion (review items T-4 / T-5), no disk needed.
+# tools/p88conv_test.py checks the Python tools and the C converter
+# (src/p88conv.c standalone driver) against exact text: MBF single /
+# double constants, &O octal, labels passed through, STOP-trap drops
+# (docs/APPROXIMATIONS.md item 26). Given the host interpreter (third
+# argument) it also runs the converted programs and checks what they
+# print: constant type / value / precedence (CONVEVAL) and the label
+# rules (CONVLAB2). The label program it converts must
+# then run in the host interpreter: GOSUB *TYPE sets A=1 and returns,
+# IF A=1 THEN *OK reaches the PRINT.
+CONVT=build-host/convtest
+rm -rf "$CONVT"; mkdir -p "$CONVT"
+cc -O1 -std=gnu11 -DP88CONV_TEST -Isrc src/p88conv.c -o build-host/p88conv 2>/dev/null \
+  && python3 tools/p88conv_test.py build-host/p88conv "$CONVT" build-host/p8pbasic \
+  || bad "p88conv_test"
+if [ -f "$CONVT/CONVLAB.BAS" ]; then
+  out=$(cd "$CONVT" && env -u P8P_DISK timeout 60 \
+          "$ROOT/build-host/p8pbasic" CONVLAB.BAS 2>/dev/null) || bad "CONVLAB exit"
+  printf '%s\n' "$out" | grep -q '^00|labrun 1$' \
+    || bad "CONVLAB: converted label program did not run through its labels"
+fi
 echo "build ok"
 
 if [ ! -f "$DISK" ]; then

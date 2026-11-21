@@ -22,6 +22,16 @@ the image itself.
 ## Tiers
 
 - **Build** — `build-host.sh` and `build-embed.sh` must both succeed.
+  The unit checks run here too, including the token conversion test
+  (`tools/p88conv_test.py`, no disk needed): the Python tools and the
+  C converter must produce the same exact text for MBF single/double
+  constants, `&O` octal, labels (passed through) and the STOP-trap
+  drops, and the converted label program must run in the host
+  interpreter. The converted constants and label fixtures are also
+  run in the host interpreter and their printed results checked
+  (type, value and precedence of constants; label separators, case
+  folding, dotted names), and the last line of each fixture is a
+  plain statement (final-line framing).
 - **Tier A (assertions)** — probe outcomes whose correct values are
   known from the genuine machine and the NEOMSC contract
   (docs/NEOMSC-CONTRACT.md): the FFDF data-slot pointers, the song-DB

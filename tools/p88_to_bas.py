@@ -2,13 +2,25 @@
 """Convert a PC-88 tokenized BASIC program (extracted from a D88 disk)
 into P9PBASIC/P8PBASIC-loadable ASCII source (.BAS, Shift_JIS, CRLF).
 
-Adaptations (P9PBASIC lacks these PC-88 features):
-  * Labels: definitions `*NAME` at line start are dropped (the line keeps
-    its number and any following statements); references after
-    GOTO/GOSUB/RESTORE/THEN/ELSE become the definition's line number
-    (THEN/ELSE gain an explicit GOTO).
+Labels pass through unchanged: `*NAME` definitions and references are
+emitted as written and resolved by the interpreter's own label support.
+A reference to a label the program does not define is reported and still
+passed through (the interpreter raises "undefined line" if it is ever
+executed, as the PC-88 does). Names are read and matched by the
+interpreter's rules (see the note above read_run). A keyword token that
+directly follows a label gets a separator (':' after a definition, a
+space after a reference) so the interpreter does not read it into the
+name.
+
+Numeric constants are spelled so the interpreter reads back the token's
+type and exact value, negative ones in parentheses (p88_detok.py, note
+above num_literal).
+
+Adaptations (the interpreter lacks these PC-88 features):
   * STOP traps: `STOP ON` and `ON STOP GOSUB *x` statements are dropped
-    (P9PBASIC cannot tokenize them). Occurrences are reported.
+    and reported (documented approximation: docs/APPROXIMATIONS.md
+    item 26; the interpreter has no STOP trap, and `STOP ON` passed
+    through would execute as a plain STOP).
   * Driver extension statements FFDD/FFDE/FFDF become XDD/XDE/XDF
     (stub statements in the interpreter; see src/exec.c stmt_ext).
 
@@ -18,20 +30,9 @@ Conversion notes/warnings go to stderr.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from p88_detok import parse_lines, TOK, OPS, FUNC, mbf_single
+from p88_detok import (parse_lines, TOK, OPS, FUNC, mbf_single, mbf_double,
+                       int_literal)
 import struct
-
-def mbf_double(b):
-    if len(b) < 8:
-        return '?'
-    exp = b[7]
-    if exp == 0:
-        return '0'
-    sign = -1.0 if (b[6] & 0x80) else 1.0
-    frac = (b[6] & 0x7F) << 48 | b[5] << 40 | b[4] << 32 | b[3] << 24 \
-        | b[2] << 16 | b[1] << 8 | b[0]
-    bits = frac | (1 << 55)
-    return repr(sign * bits * (2.0 ** (exp - 128 - 55)))
 
 
 EXT = {0xDD: 'XDD', 0xDE: 'XDE', 0xDF: 'XDF'}
@@ -46,23 +47,66 @@ def next_tok(body, i):
     while i < len(body) and body[i] == 0x20:
         i += 1
     return i
-NAMECH = set(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')
 
 
-def read_name(body, i):
+# Label names follow the interpreter's grammar, because the interpreter is
+# what resolves them in the converted text:
+#   - a name is a letter followed by letters, digits and '.' (src/token.c
+#     label scan, src/exec.c label_char); `*100` is not a label there
+#     (GOTO *100 is a syntax error);
+#   - the tokenizer upper-cases definitions and references alike, so
+#     lookup ignores case;
+#   - a definition is `*NAME` as the first thing on a line, leading spaces
+#     allowed (find_label); the whole name must match (*SUB does not find
+#     *SUB.1), and the first definition of a name wins.
+ALPHA = set(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
+LABCH = ALPHA | set(b'0123456789.')
+
+
+def read_run(body, i):
+    """The run of label characters at body[i:] -> (text, end index)."""
     j = i
-    while j < len(body) and body[j] in NAMECH:
+    while j < len(body) and body[j] in LABCH:
         j += 1
     return body[i:j].decode('ascii'), j
 
 
+def read_label(body, i):
+    """A label name at body[i:] -> (name, end index); ('', i) when what
+    is there does not start with a letter."""
+    if i >= len(body) or body[i] not in ALPHA:
+        return '', i
+    return read_run(body, i)
+
+
+def label_def(body):
+    """The label a line body defines -> (name, end index), or ('', 0)."""
+    i = next_tok(body, 0)
+    if body[i:i + 1] == b'\xf5':
+        return read_label(body, i + 1)
+    return '', 0
+
+
+def glues(body, i):
+    """True when body[i] is a keyword token: its text starts with a letter
+    and would be read by the interpreter's tokenizer as more of a label
+    name written directly before it (`*ABC` + PRINT -> label ABCPRINT)."""
+    if i >= len(body):
+        return False
+    b = body[i]
+    if b == 0xFF:
+        t = body[i + 1] if i + 1 < len(body) else 0
+        return t in EXT or t in FUNC
+    return b in TOK and TOK[b][0].isalnum()
+
+
 def collect_labels(lines):
+    """{folded name: line number} of the labels the interpreter can find."""
     labels = {}
     for no, body in lines:
-        if body[:1] == b'\xf5':
-            name, _ = read_name(body, 1)
-            if name:
-                labels[name] = no
+        name, _ = label_def(body)
+        if name:
+            labels.setdefault(name.upper(), no)
     return labels
 
 
@@ -82,25 +126,27 @@ def skip_stmt(body, i):
     return i
 
 
-def convert_body(body, labels, report, next_no):
+def convert_body(body, labels, report):
     out = []
     i = 0
     n = len(body)
     stmt_start = True     # at start of a statement (for STOP-trap drops)
-    expect_label = 0      # 1: after GOTO/GOSUB/RESTORE; 2: after THEN/ELSE
+    expect_label = False  # after GOTO/GOSUB/RESTORE/THEN/ELSE
     in_data = False
     data_quote = False
 
-    # label definition at line start
-    if body[:1] == b'\xf5':
-        name, j = read_name(body, 1)
-        if name:
-            i = j
-            if i < n and body[i] == 0x3A:
-                i += 1
-            if i >= n:
-                return 'REM *' + name
-            stmt_start = True
+    # label definition at line start: pass "*NAME" through. What follows
+    # is still the start of a statement, with or without a ':'. A keyword
+    # token directly after the name gets the ':' the interpreter's
+    # tokenizer needs to end the name there (`*NAME:STATEMENT`, the form
+    # MA2026 itself uses); a definition already followed by ':' or a space
+    # is left as written.
+    name, j = label_def(body)
+    if name:
+        out.append('*' + name)
+        if glues(body, j):
+            out.append(':')
+        i = j
 
     while i < n:
         b = body[i]
@@ -155,33 +201,30 @@ def convert_body(body, labels, report, next_no):
             out.append(name + (' ' if name[-1].isalnum() else ''))
             if b == 0x84:
                 in_data = True
-            if b in (0x89, 0x8D, 0x8C):
-                expect_label = 1
-            elif b in (0xDD, 0x9F):
-                expect_label = 2
-            else:
-                expect_label = 0
+            expect_label = b in (0x89, 0x8D, 0x8C, 0xDD, 0x9F)
             stmt_start = (b == 0xDD or b == 0x9F)  # THEN/ELSE start a stmt
             i += 1
             continue
+        # F5 in GOTO/GOSUB/RESTORE/THEN/ELSE position is a label ref:
+        # pass "*NAME" through. One the program does not define (e.g.
+        # MENU.ALP's *TYPE) is reported; the interpreter raises
+        # "undefined line" if that statement is ever executed. A name
+        # that does not start with a letter (`*100`) is not a label to the
+        # interpreter at all (syntax error) and is reported the same way.
+        # A keyword token directly after the name is set off with a space
+        # so the tokenizer does not read it into the name. (F5 with no
+        # name after it is left to the operator case below.)
         if b == 0xF5 and expect_label:
-            name, j = read_name(body, i + 1)
-            if name and name in labels:
-                if expect_label == 2:
-                    out.append('GOTO ')
-                out.append(str(labels[name]))
+            name, j = read_run(body, i + 1)
+            if name:
+                out.append('*' + name)
+                if ord(name[0]) not in ALPHA or name.upper() not in labels:
+                    report.append(f'UNDEFINED label *{name} (passed through)')
+                if glues(body, j):
+                    out.append(' ')
                 i = j
-                expect_label = 0; stmt_start = False
+                stmt_start = False  # expect_label stays for "*A,*B"
                 continue
-            # Unresolved in the shipped program (e.g. MENU.ALP's *TYPE):
-            # fall through to the next line and report loudly.
-            report.append(f'UNRESOLVED label *{name} -> falls through to {next_no}')
-            if expect_label == 2:
-                out.append('GOTO ')
-            out.append(str(next_no))
-            i = j if name else i + 1
-            expect_label = 0; stmt_start = False
-            continue
         if b in OPS:
             op = OPS[b]
             out.append(f' {op} ' if op.isalpha() else op)
@@ -189,7 +232,7 @@ def convert_body(body, labels, report, next_no):
             i += 1
             continue
         if b == 0x0B:
-            out.append('&O' + str(struct.unpack_from('<H', body, i + 1)[0])); i += 3
+            out.append('&O' + format(struct.unpack_from('<H', body, i + 1)[0], 'o')); i += 3
         elif b == 0x0C:
             out.append('&H' + format(struct.unpack_from('<H', body, i + 1)[0], 'X')); i += 3
         elif b == 0x0E:
@@ -199,7 +242,7 @@ def convert_body(body, labels, report, next_no):
         elif 0x11 <= b <= 0x1A:
             out.append(str(b - 0x11)); i += 1
         elif b == 0x1C:
-            out.append(str(struct.unpack_from('<h', body, i + 1)[0])); i += 3
+            out.append(int_literal(struct.unpack_from('<h', body, i + 1)[0])); i += 3
         elif b == 0x1D:
             out.append(mbf_single(body[i + 1:i + 5])); i += 5
         elif b == 0x1F:
@@ -210,7 +253,10 @@ def convert_body(body, labels, report, next_no):
         elif 0x20 <= b < 0x7F:
             out.append(chr(b)); i += 1
             if b != 0x20:
-                expect_label = 0; stmt_start = False
+                # ',' keeps the label position: ON x GOSUB *A,*B
+                if b != 0x2C:
+                    expect_label = False
+                stmt_start = False
         else:
             out.append(f'<{b:02X}>')
             report.append(f'unknown byte {b:02X}')
@@ -219,25 +265,32 @@ def convert_body(body, labels, report, next_no):
     return s if s else 'REM'
 
 
+def convert(data, log=None):
+    """Tokenized program bytes -> .BAS file bytes (what p88_convert()
+    in src/p88conv.c returns). Report lines go to log(str) when given."""
+    lines = parse_lines(data)
+    labels = collect_labels(lines)
+    if log:
+        log(f'labels: {labels}')
+    out_lines = []
+    for no, body in lines:
+        report = []
+        text = convert_body(body, labels, report)
+        if log:
+            for r in report:
+                log(f'line {no}: {r}')
+        out_lines.append(f'{no} {text}')
+    return ('\r\n'.join(out_lines) + '\r\n').encode('latin-1'), len(out_lines)
+
+
 def main():
     if len(sys.argv) != 3:
         print(__doc__)
         return 1
     data = open(sys.argv[1], 'rb').read()
-    lines = parse_lines(data)
-    labels = collect_labels(lines)
-    print(f'labels: {labels}', file=sys.stderr)
-    out_lines = []
-    for idx, (no, body) in enumerate(lines):
-        next_no = lines[idx + 1][0] if idx + 1 < len(lines) else no
-        report = []
-        text = convert_body(body, labels, report, next_no)
-        for r in report:
-            print(f'line {no}: {r}', file=sys.stderr)
-        out_lines.append(f'{no} {text}')
-    blob = ('\r\n'.join(out_lines) + '\r\n').encode('latin-1')
+    blob, nlines = convert(data, lambda s: print(s, file=sys.stderr))
     open(sys.argv[2], 'wb').write(blob)
-    print(f'wrote {sys.argv[2]}: {len(out_lines)} lines, {len(blob)} bytes',
+    print(f'wrote {sys.argv[2]}: {nlines} lines, {len(blob)} bytes',
           file=sys.stderr)
     return 0
 

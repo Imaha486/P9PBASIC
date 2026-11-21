@@ -630,3 +630,51 @@ P8PBASIC の実装にある近似・部分実装・環境依存を全て洗い�
     10000) であることを tests/run_regress.sh の embed 段で
     確認)。同じディスクを2回起動するだけなので、別ディスクへの
     切り替え (vessel_forget_disk) 自体は検証していない。
+
+26. **STOP トラップ（STOP ON / ON STOP GOSUB）は変換時に削除**
+    （src/p88conv.c、tools/p88_to_bas.py）【2026-11-21、レビュー指摘 T-5】
+    PC-88 の `STOP ON` / `ON STOP GOSUB *x` は、STOP キーを中断では
+    なくサブルーチン呼び出しに変えるトラップ。変換器はこの2文を
+    出力テキストから削除する（文頭にある場合のみ。削除した結果
+    空になった行は `REM` になる）。従来は変換器内のコメントだけで
+    黙って行っていた書き換えで、ここに近似として明記する。
+    - **削除するもの**: 文 `STOP ON`（トークン 90 95）と、文
+      `ON STOP GOSUB <飛び先>`（95 90 8D から文末まで）。削除の
+      たびに変換レポートへ `line N: dropped STOP ON` /
+      `line N: dropped ON STOP GOSUB` を出す（ホスト CLI と
+      エンジンの実体化はレポートを捨てるので、見るには
+      tools/p88_to_bas.py か -DP88CONV_TEST のドライバを使う）。
+      `STOP OFF` / `STOP STOP` は対象外で、変換器は OFF の
+      トークンを知らないため未知バイトとして報告される。
+    - **理由**: インタプリタに STOP トラップが無い。そのまま通すと
+      壊れる（コード読解による確認。サンドボックスで実行できず
+      未実行）:
+      (a) `STOP ON` は exec.c の文ディスパッチで T_STOP として
+      実行され、後続トークンを見ずに do_end(1) へ入る。つまり
+      その場でプログラムが「中断しました」で止まる。
+      (b) `ON STOP GOSUB` は stmt_on が ON ERROR / ON KEY 以外を
+      `ON <式> GOTO/GOSUB` として扱うため、T_STOP を式として
+      評価しようとして Syntax error になる。
+      (c) トラップ機構はファンクションキー用（keytrap_*、
+      ON KEY GOSUB / KEY(n) ON）と ON ERROR だけ。STOP キーは
+      exec_loop が hal_breakflag() を見て直接 do_end(1) を呼ぶ。
+      (d) HAL 側: hal98.c はスキャンコード 0x60 と CTRL+C、
+      halhost.c はキースクリプトの `\s` でフラグを立てる。
+      埋め込みエンジンの halp8.c には brkflag を立てる経路が無く、
+      STOP キー自体が存在しない。
+      docs/MANUAL.md も `ON STOP` を未対応としている。
+    - **このトラップに依存するタイトルで見えること**: STOP キーを
+      押してもタイトル側のハンドラは呼ばれない。ホスト CLI /
+      PC-98 HAL ではプログラムが「中断しました」で止まり、
+      埋め込みエンジン（アプリ）では STOP キーが無いので何も
+      起きない。
+    - **MA2026**: MENU.ALP 130 行と menu 1040 行がどちらも
+      `STOP ON:ON STOP GOSUB *STP` を持つ（変換後は `REM`）。
+      menu の *STP は `XDF S:RUN "MENU  ALP":RETURN`（演奏を止めて
+      ブートメニューからやり直す）で、この「STOP で最初に戻る」
+      操作が使えない。MENU.ALP の *STP はコメントと RETURN だけ。
+    一般化するなら、インタプリタに STOP トラップ（ON STOP GOSUB の
+    登録、STOP ON/OFF/STOP の状態、exec_loop の hal_breakflag 分岐で
+    トラップへ入る処理）を足し、埋め込み HAL に STOP キーの入口を
+    作った上で、変換器の削除をやめる。
+    回帰テスト: tools/p88conv_test.py（削除とレポートの文言を固定）。

@@ -2,17 +2,26 @@
  *
  * C port of tools/p88_to_bas.py (token tables shared with
  * tools/p88_detok.py; format notes in docs/TOKEN-FORMAT.md).  The Python
- * tool is the spec: the text produced here must match the file it writes
- * byte for byte, so several of its quirks are reproduced on purpose and
- * marked "quirk" below.  Don't "fix" them here without fixing the Python
- * side too, or the two drift apart.
+ * tool is the mirror: the text produced here must match the file it writes
+ * byte for byte (tools/p88conv_test.py compares the two).  Change one side
+ * only together with the other, or the two drift apart.
+ *
+ * Labels pass through unchanged: `*NAME` definitions and references are
+ * emitted as written and resolved by the interpreter's own label support
+ * (token.c / exec.c).  A reference to a label this program does not define
+ * is reported and still passed through; the interpreter raises "undefined
+ * line" if it is ever executed, as the PC-88 does.  Names are read and
+ * matched by the interpreter's rules (see "labels" below), and a keyword
+ * token that directly follows a label gets a separator (':' after a
+ * definition, a space after a reference) so the interpreter does not read
+ * it into the name.
+ *
+ * Numeric constants are spelled so the interpreter reads back the token's
+ * type and exact value, negative ones in parentheses (see "numbers").
  *
  * Adaptations made while converting (P8PBASIC lacks these PC-88 features):
- *   - Labels: a `*NAME` definition at line start is dropped (the line keeps
- *     its number and any following statements).  References after
- *     GOTO/GOSUB/RESTORE/THEN/ELSE become the defining line's number;
- *     THEN/ELSE gain an explicit GOTO.
- *   - STOP traps: `STOP ON` and `ON STOP GOSUB *x` are dropped.
+ *   - STOP traps: `STOP ON` and `ON STOP GOSUB *x` are dropped and
+ *     reported (documented approximation: docs/APPROXIMATIONS.md item 26).
  *   - Driver extension statements FFDD/FFDE/FFDF become XDD/XDE/XDF.
  *
  * Text model: the Python tool builds a str with chr(byte) per raw byte and
@@ -120,7 +129,8 @@ static const char *ext_name(int t)
     return 0;
 }
 
-/* Operators F0-FE.  F5 doubles as the label marker in GOTO position. */
+/* Operators F0-FE.  F5 doubles as the label marker (line start and jump
+ * target position); both uses come out as '*'. */
 static const char *op_name(int b)
 {
     static const char *const ops[] = {
@@ -141,89 +151,222 @@ static int is_alnum_ascii(int c)
 /* numbers                                                            */
 /* ------------------------------------------------------------------ */
 
-/* Format a double exactly as Python's repr() does: the shortest digit
- * string that round-trips, fixed notation for 1e-4 <= |x| < 1e16 (with a
- * trailing ".0" when integral), otherwise d.ddde[+-]XX.  The values here
- * are always finite and non-zero (MBF exponent 0 is caught earlier). */
-static void put_pyrepr(Buf *b, double x)
+/* Does the nd-digit decimal d.ddd * 10^exp10 read back as exactly x? */
+static int reads_back(const char *dig, int nd, int exp10, double x)
 {
-    char tmp[64], digits[32];
-    int prec, nd = 0, exp10, decpt, k;
+    char t[48];
+    int k, o = 0;
+    t[o++] = dig[0];
+    t[o++] = '.';
+    for (k = 1; k < nd; k++) t[o++] = dig[k];
+    t[o++] = '0';
+    sprintf(t + o, "e%d", exp10);
+    return strtod(t, 0) == x;
+}
+
+/* Format a positive finite double exactly as Python's repr() does: the
+ * shortest digit string that reads back to the same double (and of those
+ * the one nearest the value), fixed notation for 1e-4 <= x < 1e16 (with a
+ * trailing ".0" when integral), otherwise d.ddde[+-]XX.  out needs 32
+ * bytes.
+ *
+ * For each length nd = 1..17 the candidates are the correctly rounded
+ * nd-digit decimal ("%.*e") and its two neighbours one unit in the last
+ * place away.  The rounded one alone is not enough: the set of decimals
+ * that read back to x is an interval around x, lopsided when x is a power
+ * of two, so the nearest nd-digit decimal can fall outside it while the
+ * one on the other side of x is inside (2^-24 = 5.9604644775390625e-08:
+ * 16 digits round to ...062, which misses; ...063 reads back).  At most
+ * one candidate can succeed when the rounded one fails, and when the
+ * rounded one succeeds it is the nearest, so the first hit is repr()'s
+ * answer.  17 digits always read back. */
+static void fmt_pyrepr(double x, char *out)
+{
+    char tmp[64], dig[24], alt[24];
+    int nd, exp10 = 0, decpt, k, o = 0;
     const char *s;
 
-    for (prec = 0; prec < 17; prec++) {        /* 1..17 significant digits */
-        snprintf(tmp, sizeof tmp, "%.*e", prec, x);
-        if (strtod(tmp, 0) == x) break;
+    for (nd = 1; nd <= 17; nd++) {
+        int n = 0, e2;
+        snprintf(tmp, sizeof tmp, "%.*e", nd - 1, x);
+        for (s = tmp; *s && *s != 'e'; s++)
+            if (*s >= '0' && *s <= '9' && n < 17) dig[n++] = *s;
+        exp10 = atoi(s + 1);
+        if (reads_back(dig, nd, exp10, x)) break;
+
+        memcpy(alt, dig, (size_t)nd);           /* one unit up */
+        e2 = exp10;
+        for (k = nd - 1; k >= 0 && alt[k] == '9'; k--) alt[k] = '0';
+        if (k >= 0) alt[k]++;
+        else { alt[0] = '1'; e2++; }            /* 99..9 -> 10..0 */
+        if (reads_back(alt, nd, e2, x)) {
+            memcpy(dig, alt, (size_t)nd); exp10 = e2; break;
+        }
+
+        memcpy(alt, dig, (size_t)nd);           /* one unit down */
+        e2 = exp10;
+        for (k = nd - 1; k > 0 && alt[k] == '0'; k--) alt[k] = '9';
+        alt[k]--;
+        if (alt[0] == '0') {                    /* 10..0 -> 99..9 */
+            for (k = 0; k < nd; k++) alt[k] = '9';
+            e2--;
+        }
+        if (reads_back(alt, nd, e2, x)) {
+            memcpy(dig, alt, (size_t)nd); exp10 = e2; break;
+        }
     }
-    s = tmp;
-    if (*s == '-') { buf_putc(b, '-'); s++; }
-    for (; *s && *s != 'e'; s++)
-        if (*s >= '0' && *s <= '9') digits[nd++] = *s;
-    exp10 = atoi(s + 1);
-    while (nd > 1 && digits[nd - 1] == '0') nd--;   /* %.e may pad zeros */
-    digits[nd] = 0;
+    if (nd > 17) nd = 17;       /* not reached: 17 digits read back */
+    while (nd > 1 && dig[nd - 1] == '0') nd--;
     decpt = exp10 + 1;          /* digits are 0.DDDD * 10^decpt */
 
     if (decpt > -4 && decpt <= 16) {
         if (decpt <= 0) {
-            buf_puts(b, "0.");
-            for (k = 0; k < -decpt; k++) buf_putc(b, '0');
-            buf_puts(b, digits);
+            out[o++] = '0'; out[o++] = '.';
+            for (k = 0; k < -decpt; k++) out[o++] = '0';
+            for (k = 0; k < nd; k++) out[o++] = dig[k];
         } else if (decpt >= nd) {
-            buf_puts(b, digits);
-            for (k = nd; k < decpt; k++) buf_putc(b, '0');
-            buf_puts(b, ".0");
+            for (k = 0; k < nd; k++) out[o++] = dig[k];
+            for (k = nd; k < decpt; k++) out[o++] = '0';
+            out[o++] = '.'; out[o++] = '0';
         } else {
-            buf_putn(b, digits, (size_t)decpt);
-            buf_putc(b, '.');
-            buf_puts(b, digits + decpt);
+            for (k = 0; k < decpt; k++) out[o++] = dig[k];
+            out[o++] = '.';
+            for (k = decpt; k < nd; k++) out[o++] = dig[k];
         }
+        out[o] = 0;
     } else {
-        buf_putc(b, digits[0]);
-        if (nd > 1) { buf_putc(b, '.'); buf_puts(b, digits + 1); }
-        snprintf(tmp, sizeof tmp, "e%c%02d", exp10 < 0 ? '-' : '+',
-                 exp10 < 0 ? -exp10 : exp10);
-        buf_puts(b, tmp);
+        out[o++] = dig[0];
+        if (nd > 1) {
+            out[o++] = '.';
+            for (k = 1; k < nd; k++) out[o++] = dig[k];
+        }
+        sprintf(out + o, "e%c%02d", exp10 < 0 ? '-' : '+',
+                exp10 < 0 ? -exp10 : exp10);
     }
+}
+
+/* Spelling of numeric constants (p88_detok.py: _typed / num_literal /
+ * int_literal; the two must stay byte-identical).  The text is read back
+ * by the interpreter, whose parser (num.c str_to_num) takes the type from
+ * the spelling:
+ *   suffix % / ! / #        -> integer / single / double
+ *   exponent letter D       -> double
+ *   exponent letter E       -> single
+ *   no '.', value <= 32767  -> integer
+ *   more than 7 digits      -> double  (digits counted without leading
+ *                                       zeros)
+ *   otherwise               -> single
+ * and a single literal above 1.70141E+38 is an Overflow error.  The
+ * digits are the repr() digits, so the value read back is exact; the
+ * letter / suffix is chosen so the type read back is the token's type:
+ *   single: plain form as is when it has <= 7 digits, else with '!';
+ *           exponent form with 'E'; above the literal limit the exact
+ *           single product (half*2), which the interpreter's single
+ *           multiply does not range-check.
+ *   double: plain form as is when it has > 7 digits, else with '#';
+ *           exponent form with 'D'.
+ * Negative constants are parenthesized: the interpreter's unary minus
+ * binds looser than '^', so a bare "-2.5^2" would read as -(2.5^2). */
+#define SNG_LITERAL_MAX 1.70141e38
+
+static void put_typed(Buf *b, double a, int dbl)    /* a > 0 */
+{
+    char r[32], *e;
+    const char *s;
+    int nd = 0, lead = 1;
+
+    fmt_pyrepr(a, r);
+    e = strchr(r, 'e');
+    if (e) {
+        *e = dbl ? 'D' : 'E';
+        buf_puts(b, r);
+        return;
+    }
+    for (s = r; *s; s++) {                  /* the parser's digit count */
+        if (*s == '.') continue;
+        if (*s != '0' || !lead) { nd++; lead = 0; }
+    }
+    buf_puts(b, r);
+    if (dbl) { if (nd <= 7) buf_putc(b, '#'); }
+    else if (nd > 7) buf_putc(b, '!');
+}
+
+static void put_num_literal(Buf *b, double v, int dbl)  /* v != 0 */
+{
+    double a = v < 0 ? -v : v;
+    if (v < 0) buf_puts(b, "(-");
+    if (!dbl && a > SNG_LITERAL_MAX) {
+        buf_putc(b, '(');
+        put_typed(b, a * 0.5, 0);
+        buf_puts(b, "*2)");
+    } else {
+        put_typed(b, a, dbl);
+    }
+    if (v < 0) buf_putc(b, ')');
+}
+
+/* Signed 16-bit integer constant.  -32768 has no integer literal (32768
+ * reads as a single), so it is spelled as integer arithmetic that stays
+ * integer. */
+static void put_int16(Buf *b, long v)
+{
+    if (v >= 0) { buf_putl(b, v); return; }
+    if (v == -32768L) { buf_puts(b, "(-32767-1)"); return; }
+    buf_putc(b, '(');
+    buf_putl(b, v);
+    buf_putc(b, ')');
 }
 
 static double scale2(double v, int e);
 
-/* MBF single: [m0][m1][m2][exp].  Quirk (inherited from p88_detok.py):
- * the sign bit (bit 7 of m2) is not stripped and not applied; the hidden
- * 1 is OR'd in at bit 31, leaving bits 24-30 zero.  The resulting value is
- * bits * 2^(exp-151), which is exact in a double.  Short slice -> "?". */
+/* MBF numbers are sign * 0.1fff...(binary) * 2^(exp-128): the mantissa is
+ * a fraction in [0.5, 1) whose leading 1 is implied (its bit position
+ * holds the sign instead), and exp == 0 means zero.  1.0 is therefore
+ * exponent 0x81 with an all-zero stored mantissa.
+ *
+ * MBF single: [m0][m1][m2: sign|m2][exp].  24-bit mantissa with the hidden
+ * bit at bit 23:
+ *   bits  = m0 | m1<<8 | (m2 & 0x7F)<<16 | 0x800000
+ *   value = sign * bits * 2^(exp-128-24)
+ *         = sign * (1 + frac/2^23) * 2^(exp-129)
+ * which is exact in a double.  Zero keeps its type ("0!").  Short slice
+ * -> "?". */
 static void put_mbf_single(Buf *b, const unsigned char *p, long avail)
 {
     double bits;
     if (avail < 4) { buf_putc(b, '?'); return; }
-    if (p[3] == 0) { buf_putc(b, '0'); return; }
+    if (p[3] == 0) { buf_puts(b, "0!"); return; }
     bits = (double)((unsigned long)p[0] | ((unsigned long)p[1] << 8) |
-                    ((unsigned long)p[2] << 16) | 0x80000000UL);
-    put_pyrepr(b, scale2(bits, (int)p[3] - 127 - 24));
+                    ((unsigned long)(p[2] & 0x7F) << 16) | 0x800000UL);
+    if (p[2] & 0x80) bits = -bits;
+    put_num_literal(b, scale2(bits, (int)p[3] - 128 - 24), 0);
 }
 
-/* MBF double: [m0..m5][m6: sign|m6][exp].  56-bit mantissa with hidden
- * bit 55.  Python converts the int to float first (round-half-even to 53
- * bits), which the uint64 -> double conversion here also does. */
+/* MBF double: [m0..m5][m6: sign|m6][exp].  56-bit mantissa with the hidden
+ * bit at bit 55:
+ *   value = sign * bits * 2^(exp-128-56)
+ * Python converts the int to float first (round-half-even to 53 bits),
+ * which the uint64 -> double conversion here also does.  That rounding is
+ * a representation limit shared with the interpreter, whose double is a
+ * binary64 (docs/TOKEN-FORMAT.md).  Zero keeps its type ("0#"). */
 static void put_mbf_double(Buf *b, const unsigned char *p, long avail)
 {
     unsigned long long frac;
     double v;
     int k;
     if (avail < 8) { buf_putc(b, '?'); return; }
-    if (p[7] == 0) { buf_putc(b, '0'); return; }
+    if (p[7] == 0) { buf_puts(b, "0#"); return; }
     frac = (unsigned long long)(p[6] & 0x7F) << 48;
     for (k = 5; k >= 0; k--) frac |= (unsigned long long)p[k] << (8 * k);
     frac |= 1ULL << 55;
     v = (double)frac;
     if (p[6] & 0x80) v = -v;
-    put_pyrepr(b, scale2(v, (int)p[7] - 128 - 55));
+    put_num_literal(b, scale2(v, (int)p[7] - 128 - 56), 1);
 }
 
 /* v * 2^e without libm (the acceptance build links no -lm).  Each step is
  * an exact power-of-two scaling; for MBF ranges (|e| <= 183, mantissa
- * >= 2^31) the value stays well inside the normal double range. */
+ * >= 2^23) the value stays well inside the normal double range. */
 static double scale2(double v, int e)
 {
     for (; e > 0; e--) v *= 2.0;
@@ -244,12 +387,40 @@ typedef struct { long no; long off, len; } Line;
  * real files, so (as in p88_detok.parse_lines) we probe link, link-1,
  * link+1, link-2, link+2 for a header whose line number is a little larger
  * and whose own link points forward.  When no candidate fits, this is the
- * last line: its body runs to the first 00 *inclusive* (quirk: the 00 is
- * kept, and later shows up as "<00>").  Returns the line count, or -1 on
+ * last line, framed by last_line_end().  Returns the line count, or -1 on
  * allocation failure. */
+static const int link_probe[5] = { 0, -1, 1, -2, 2 };
+
+/* End (exclusive) of the body of the last line, whose body starts at off.
+ * The line's own link field points just past its 00 terminator, at the
+ * 00 00 end-of-program marker, so the body ends at link-1; number
+ * payloads may contain 00 bytes, so the body is never scanned for one.
+ * The link drifts like any other, hence the probes: first a terminator
+ * followed by the end marker, then (file cut short after the terminator)
+ * a terminator alone.  Only when the link leads nowhere does the first 00
+ * decide. */
+static long last_line_end(const unsigned char *d, long n, long off, long link)
+{
+    const unsigned char *z;
+    int k;
+    for (k = 0; k < 5; k++) {
+        long cand = link + link_probe[k];
+        if (cand < off + 1 || cand + 2 > n) continue;
+        if (d[cand - 1] == 0 && d[cand] == 0 && d[cand + 1] == 0)
+            return cand - 1;
+    }
+    for (k = 0; k < 5; k++) {
+        long cand = link + link_probe[k];
+        if (cand < off + 1 || cand > n) continue;
+        if (d[cand - 1] == 0) return cand - 1;
+    }
+    z = (const unsigned char *)memchr(d + off, 0, (size_t)(n - off));
+    return z ? (long)(z - d) : n;
+}
+
 static long parse_lines(const unsigned char *d, long n, Line **out)
 {
-    static const int delta[5] = { 0, -1, 1, -2, 2 };
+    static const int *const delta = link_probe;
     Line *v = 0;
     long cnt = 0, cap = 0, p = 0;
 
@@ -273,9 +444,7 @@ static long parse_lines(const unsigned char *d, long n, Line **out)
         }
         off = p + 4;
         if (nxt < 0) {
-            const unsigned char *z = (const unsigned char *)
-                memchr(d + off, 0, (size_t)(n - off));
-            long end = z ? (long)(z - d) + 1 : n;
+            long end = last_line_end(d, n, off, link);
             v[cnt].no = no; v[cnt].off = off; v[cnt].len = end - off;
             cnt++;
             break;
@@ -294,24 +463,75 @@ static long parse_lines(const unsigned char *d, long n, Line **out)
 /* labels                                                             */
 /* ------------------------------------------------------------------ */
 
+/* Label names follow the interpreter's grammar, because the interpreter
+ * is what resolves them in the converted text:
+ *   - a name is a letter followed by letters, digits and '.' (token.c
+ *     label scan, exec.c label_char); `*100` is not a label there
+ *     (GOTO *100 is a syntax error);
+ *   - the tokenizer upper-cases definitions and references alike, so
+ *     lookup ignores case;
+ *   - a definition is `*NAME` as the first thing on a line, leading
+ *     spaces allowed (find_label); the whole name must match (*SUB does
+ *     not find *SUB.1), and the first definition of a name wins. */
 typedef struct { const unsigned char *name; long nlen; long no; } Label;
 
-static int is_namech(int c) { return is_alnum_ascii(c); }
-
-static long read_name(const unsigned char *body, long n, long i)
+static int is_alpha_ascii(int c)
 {
-    while (i < n && is_namech(body[i])) i++;
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+static int is_labch(int c) { return is_alnum_ascii(c) || c == '.'; }
+
+static int fold(int c) { return (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c; }
+
+/* End of the run of label characters at body[i..]. */
+static long read_run(const unsigned char *body, long n, long i)
+{
+    while (i < n && is_labch(body[i])) i++;
     return i;
 }
 
-/* Linear search is fine: the shipped programs define a handful. */
+static long next_tok(const unsigned char *body, long n, long i);
+
+/* The label a line body defines: its name is body[*start .. return);
+ * returns 0 when the line defines none. */
+static long label_def(const unsigned char *body, long n, long *start)
+{
+    long i = next_tok(body, n, 0);
+    if (i + 1 < n && body[i] == 0xF5 && is_alpha_ascii(body[i + 1])) {
+        *start = i + 1;
+        return read_run(body, n, i + 1);
+    }
+    return 0;
+}
+
+/* True when body[i] is a keyword token: its text starts with a letter and
+ * would be read by the interpreter's tokenizer as more of a label name
+ * written directly before it (`*ABC` + PRINT -> label ABCPRINT). */
+static int glues(const unsigned char *body, long n, long i)
+{
+    const char *nm;
+    if (i >= n) return 0;
+    if (body[i] == 0xFF) {
+        int t = (i + 1 < n) ? body[i + 1] : 0;
+        return ext_name(t) != 0 || func_name(t) != 0;
+    }
+    nm = tok_name(body[i]);
+    return nm != 0 && is_alnum_ascii((unsigned char)nm[0]);
+}
+
+/* Case-insensitive.  Linear search is fine: the shipped programs define a
+ * handful. */
 static Label *find_label(Label *lab, long nlab, const unsigned char *s,
                          long len)
 {
-    long k;
-    for (k = 0; k < nlab; k++)
-        if (lab[k].nlen == len && memcmp(lab[k].name, s, (size_t)len) == 0)
-            return &lab[k];
+    long k, j;
+    for (k = 0; k < nlab; k++) {
+        if (lab[k].nlen != len) continue;
+        for (j = 0; j < len; j++)
+            if (fold(lab[k].name[j]) != fold(s[j])) break;
+        if (j == len) return &lab[k];
+    }
     return 0;
 }
 
@@ -359,27 +579,28 @@ static long next_tok(const unsigned char *body, long n, long i)
  * -1 where the Python tool would raise (struct.unpack_from or indexing
  * past the end of the body on a truncated number token). */
 static int convert_body(const unsigned char *body, long n, Label *lab,
-                        long nlab, long no, long next_no, Buf *out, Buf *rep)
+                        long nlab, long no, Buf *out, Buf *rep)
 {
     Buf t = { 0, 0, 0, 0 };
     long i = 0, a, z;
     int stmt_start = 1;     /* at start of a statement (STOP-trap drops) */
-    int expect_label = 0;   /* 1: after GOTO/GOSUB/RESTORE, 2: THEN/ELSE */
+    int expect_label = 0;   /* after GOTO/GOSUB/RESTORE/THEN/ELSE */
     int in_data = 0, data_quote = 0;
     char msg[128];
 
-    /* label definition at line start: drop "*NAME" and a following ':' */
-    if (n > 0 && body[0] == 0xF5) {
-        long j = read_name(body, n, 1);
-        if (j > 1) {
+    /* label definition at line start: pass "*NAME" through.  What follows
+     * is still the start of a statement, with or without a ':'.  A
+     * keyword token directly after the name gets the ':' the
+     * interpreter's tokenizer needs to end the name there
+     * (`*NAME:STATEMENT`, the form MA2026 itself uses); a definition
+     * already followed by ':' or a space is left as written. */
+    {
+        long s0 = 0, j = label_def(body, n, &s0);
+        if (j) {
+            buf_putc(&t, '*');
+            buf_putn(&t, (const char *)body + s0, (size_t)(j - s0));
+            if (glues(body, n, j)) buf_putc(&t, ':');
             i = j;
-            if (i < n && body[i] == 0x3A) i++;
-            if (i >= n) {           /* label-only line: keep it visible */
-                buf_puts(out, "REM *");
-                buf_putn(out, (const char *)body + 1, (size_t)(j - 1));
-                return 0;
-            }
-            stmt_start = 1;
         }
     }
 
@@ -453,38 +674,41 @@ static int convert_body(const unsigned char *body, long n, Label *lab,
             if (is_alnum_ascii((unsigned char)nm[strlen(nm) - 1]))
                 buf_putc(&t, ' ');
             if (b == 0x84) in_data = 1;
-            if (b == 0x89 || b == 0x8D || b == 0x8C) expect_label = 1;
-            else if (b == 0xDD || b == 0x9F) expect_label = 2;
-            else expect_label = 0;
+            expect_label = (b == 0x89 || b == 0x8D || b == 0x8C ||
+                            b == 0xDD || b == 0x9F);
             stmt_start = (b == 0xDD || b == 0x9F); /* THEN/ELSE start one */
             i++;
             continue;
         }
 
-        /* F5 in GOTO/GOSUB/RESTORE/THEN/ELSE position is a label ref */
+        /* F5 in GOTO/GOSUB/RESTORE/THEN/ELSE position is a label ref:
+         * pass "*NAME" through.  One the program does not define (e.g.
+         * MENU.ALP's *TYPE) is reported; the interpreter raises
+         * "undefined line" if that statement is ever executed.  A name
+         * that does not start with a letter (`*100`) is not a label to
+         * the interpreter at all (syntax error) and is reported the
+         * same way.  A keyword token directly after the name is set off
+         * with a space so the tokenizer does not read it into the name.
+         * (F5 with no name after it is left to the operator case
+         * below.) */
         if (b == 0xF5 && expect_label) {
-            long j = read_name(body, n, i + 1);
+            long j = read_run(body, n, i + 1);
             long nlen = j - (i + 1);
-            Label *L = nlen ? find_label(lab, nlab, body + i + 1, nlen) : 0;
-            if (L) {
-                if (expect_label == 2) buf_puts(&t, "GOTO ");
-                buf_putl(&t, L->no);
+            if (nlen) {
+                buf_putc(&t, '*');
+                buf_putn(&t, (const char *)body + i + 1, (size_t)nlen);
+                if (!is_alpha_ascii(body[i + 1]) ||
+                    !find_label(lab, nlab, body + i + 1, nlen)) {
+                    buf_puts(rep, "line "); buf_putl(rep, no);
+                    buf_puts(rep, ": UNDEFINED label *");
+                    buf_putn(rep, (const char *)body + i + 1, (size_t)nlen);
+                    buf_puts(rep, " (passed through)\n");
+                }
+                if (glues(body, n, j)) buf_putc(&t, ' ');
                 i = j;
-                expect_label = 0; stmt_start = 0;
+                stmt_start = 0;     /* expect_label stays for "*A,*B" */
                 continue;
             }
-            /* Unresolved in the shipped program (e.g. MENU.ALP's *TYPE):
-             * fall through to the next line and report loudly. */
-            buf_puts(rep, "line "); buf_putl(rep, no);
-            buf_puts(rep, ": UNRESOLVED label *");
-            buf_putn(rep, (const char *)body + i + 1, (size_t)nlen);
-            buf_puts(rep, " -> falls through to ");
-            buf_putl(rep, next_no); buf_putc(rep, '\n');
-            if (expect_label == 2) buf_puts(&t, "GOTO ");
-            buf_putl(&t, next_no);
-            i = nlen ? j : i + 1;
-            expect_label = 0; stmt_start = 0;
-            continue;
         }
 
         if ((nm = op_name(b)) != 0) {              /* operator */
@@ -504,15 +728,13 @@ static int convert_body(const unsigned char *body, long n, Label *lab,
             if (i + 3 > n) { free(t.p); return -1; }
             v = rd_u16(body + i + 1);
             if (b == 0x0B) {
-                /* Quirk: the Python tool prints &O with the value in
-                 * *decimal* (str(), not oct()).  Reproduced verbatim. */
-                buf_puts(&t, "&O"); buf_putl(&t, (long)v);
+                sprintf(msg, "&O%o", v); buf_puts(&t, msg);
             } else if (b == 0x0C) {
                 sprintf(msg, "&H%X", v); buf_puts(&t, msg);
             } else if (b == 0x0E) {     /* line-number reference */
                 buf_putl(&t, (long)v);
             } else {                    /* signed int16 */
-                buf_putl(&t, v >= 0x8000 ? (long)v - 0x10000L : (long)v);
+                put_int16(&t, v >= 0x8000 ? (long)v - 0x10000L : (long)v);
             }
             i += 3;
         } else if (b == 0x0F) {         /* one-byte unsigned int */
@@ -535,7 +757,11 @@ static int convert_body(const unsigned char *body, long n, Label *lab,
         } else if (b >= 0x20 && b < 0x7F) {    /* names, punctuation */
             buf_putc(&t, b);
             i++;
-            if (b != 0x20) { expect_label = 0; stmt_start = 0; }
+            if (b != 0x20) {
+                /* ',' keeps the label position: ON x GOSUB *A,*B */
+                if (b != 0x2C) expect_label = 0;
+                stmt_start = 0;
+            }
         } else {
             sprintf(msg, "<%02X>", b);
             buf_puts(&t, msg);
@@ -580,34 +806,32 @@ char *p88_convert(const unsigned char *data, unsigned long len,
     nlines = parse_lines(data, (long)len, &lines);
     if (nlines < 0) return 0;
 
-    /* collect_labels: `*NAME` at line start; a later definition of the
-     * same name overrides the line number but keeps the first position
-     * (Python dict semantics, which the report's dict repr shows). */
+    /* collect_labels: the definitions the interpreter can find, for the
+     * report and for the undefined-reference check only (the text keeps
+     * the labels).  The first definition of a name wins, as in the
+     * interpreter's lookup. */
     if (nlines > 0) {
         lab = (Label *)malloc((size_t)nlines * sizeof *lab);
         if (!lab) { free(lines); return 0; }
     }
     for (k = 0; k < nlines; k++) {
         const unsigned char *body = data + lines[k].off;
-        long n = lines[k].len, j;
-        Label *L;
-        if (n < 1 || body[0] != 0xF5) continue;
-        j = read_name(body, n, 1);
-        if (j == 1) continue;
-        L = find_label(lab, nlab, body + 1, j - 1);
-        if (!L) {
-            L = &lab[nlab++];
-            L->name = body + 1; L->nlen = j - 1;
-        }
-        L->no = lines[k].no;
+        long s0 = 0, j = label_def(body, lines[k].len, &s0);
+        if (!j || find_label(lab, nlab, body + s0, j - s0)) continue;
+        lab[nlab].name = body + s0;
+        lab[nlab].nlen = j - s0;
+        lab[nlab].no = lines[k].no;
+        nlab++;
     }
 
-    /* "labels: {'A': 10, 'B': 20}" as Python prints the dict */
+    /* "labels: {'A': 10, 'B': 20}" as Python prints the dict (names
+     * folded to upper case, as the interpreter stores them) */
     buf_puts(&rep, "labels: {");
     for (k = 0; k < nlab; k++) {
+        long j;
         if (k) buf_puts(&rep, ", ");
         buf_putc(&rep, '\'');
-        buf_putn(&rep, (const char *)lab[k].name, (size_t)lab[k].nlen);
+        for (j = 0; j < lab[k].nlen; j++) buf_putc(&rep, fold(lab[k].name[j]));
         buf_puts(&rep, "': ");
         buf_putl(&rep, lab[k].no);
     }
@@ -616,12 +840,11 @@ char *p88_convert(const unsigned char *data, unsigned long len,
     /* "<no> <text>" lines joined by CRLF, plus a final CRLF (so an empty
      * program yields a lone CRLF, as '\r\n'.join([]) + '\r\n' does). */
     for (k = 0; k < nlines && !fail; k++) {
-        long next_no = (k + 1 < nlines) ? lines[k + 1].no : lines[k].no;
         if (k) buf_puts(&out, "\r\n");
         buf_putl(&out, lines[k].no);
         buf_putc(&out, ' ');
         if (convert_body(data + lines[k].off, lines[k].len, lab, nlab,
-                         lines[k].no, next_no, &out, &rep) < 0)
+                         lines[k].no, &out, &rep) < 0)
             fail = 1;
     }
     buf_puts(&out, "\r\n");
