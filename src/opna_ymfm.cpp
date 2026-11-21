@@ -60,7 +60,26 @@ struct Iface : ymfm::ymfm_interface {
 
 Iface iface;
 ymfm::ym2608 chip(iface);
-ymfm::ym2608::output_data out;
+
+/* Chip-sample block buffer. push_frame() consumes chip-rate samples
+ * from here; an empty buffer is refilled by ONE chip.generate() call.
+ * A refill never generates more samples than the frames being rendered
+ * right now will consume (block_need), so the chip is never clocked
+ * past a point where a register write, a status read or an ADPCM
+ * memory write could still land: the buffer is always empty again
+ * when render_frames() returns. */
+const int BLOCK_SAMPLES = 2048;
+ymfm::ym2608::output_data block[BLOCK_SAMPLES];
+int block_pos = 0, block_fill = 0;
+long block_need = 0;            /* chip samples the current render still needs */
+
+/* Output frames opna_advance() has accounted for but not rendered yet.
+ * They are rendered (render_pending) before anything that changes or
+ * observes chip state, whenever PENDING_MAX of them have piled up, and
+ * as soon as they would complete a 512-frame output chunk. */
+const long PENDING_MAX = 128;
+long pending_frames = 0;
+void render_pending(void);
 
 int enabled = -1;               /* -1 unknown, 0 off, 1 on */
 FILE *wav = nullptr;
@@ -107,6 +126,7 @@ void wav_header(uint32_t data_bytes)
 
 void finalize(void)
 {
+    render_pending();
     if (outfill) {
         if (wav) fwrite(outbuf, 2, (size_t)outfill * 2, wav);
         if (sink_fn) sink_fn(outbuf, outfill, sink_ctx);
@@ -147,6 +167,20 @@ int16_t clamp16(double v)
     return (int16_t)v;
 }
 
+void refill_block(void)
+{
+    /* With P8P_TRACE_AUDIO the chip is clocked one sample at a time so
+     * the ADPCM-A read counter in the 10 s log line is exactly what the
+     * unbatched renderer printed. */
+    long n = trace_audio ? 1 : block_need;
+    if (n > BLOCK_SAMPLES) n = BLOCK_SAMPLES;
+    if (n < 1) n = 1;           /* unreachable: block_need is an exact count */
+    chip.generate(block, (uint32_t)n);
+    block_pos = 0;
+    block_fill = (int)n;
+    block_need -= n;
+}
+
 void push_frame(void)
 {
     res_pos += (double)chip_rate / HOST_RATE;
@@ -154,7 +188,8 @@ void push_frame(void)
     int n = 0;
     while (res_pos >= 1.0) {
         res_pos -= 1.0;
-        chip.generate(&out, 1);
+        if (block_pos == block_fill) refill_block();
+        const ymfm::ym2608::output_data &out = block[block_pos++];
         al += out.data[0] + 0.20 * out.data[2];
         ar += out.data[1] + 0.20 * out.data[2];
         n++;
@@ -186,10 +221,35 @@ void push_frame(void)
     }
 }
 
+/* Render `frames` output frames. The chip samples they consume are
+ * counted first by running the resampler accumulator dry (the same
+ * double operations push_frame performs), so the refills can ask the
+ * chip for exactly that many samples and no more. */
+void render_frames(long frames)
+{
+    double pos = res_pos;
+    long need = 0;
+    for (long i = 0; i < frames; i++) {
+        pos += (double)chip_rate / HOST_RATE;
+        while (pos >= 1.0) { pos -= 1.0; need++; }
+    }
+    block_need = need;
+    for (long i = 0; i < frames; i++) push_frame();
+    block_need = 0;
+}
+
+void render_pending(void)
+{
+    long frames = pending_frames;
+    pending_frames = 0;
+    if (frames > 0) render_frames(frames);
+}
+
 } // namespace
 
 extern "C" void opna_adpcm_b_write(unsigned long addr, int value)
 {
+    render_pending();           /* earlier frames read the old contents */
     if (addr < iface.adpcm_b_ram.size())
         iface.adpcm_b_ram[(size_t)addr] = (uint8_t)value;
 }
@@ -204,6 +264,7 @@ extern "C" int opna_adpcm_b_read(unsigned long addr)
  * rhythm ROM supply. */
 extern "C" void opna_adpcm_a_write(unsigned long addr, int value)
 {
+    render_pending();
     if (addr < iface.adpcm_a_ram.size())
         iface.adpcm_a_ram[(size_t)addr] = (uint8_t)value;
 }
@@ -215,6 +276,12 @@ extern "C" int opna_adpcm_a_read(unsigned long addr)
 
 extern "C" void opna_set_sink(opna_sink_fn fn, void *ctx)
 {
+    /* Render the owed frames while the outgoing sink is still set. Only
+     * chunks this COMPLETES (512 frames) reach that sink: a partial
+     * chunk stays in outbuf and would be delivered to the new sink
+     * after a direct switch. The engine's destroy/create sequence
+     * avoids that by calling opna_reset() first, which drops it. */
+    render_pending();
     sink_fn = fn;
     sink_ctx = ctx;
     if (enabled == 0) enabled = -1;   /* re-probe on the next write */
@@ -222,6 +289,9 @@ extern "C" void opna_set_sink(opna_sink_fn fn, void *ctx)
 
 extern "C" void opna_reset(void)
 {
+    render_pending();           /* deliver what the old session is owed */
+    block_pos = block_fill = 0; /* never carry chip samples across sessions */
+    block_need = 0;
     std::fill(iface.adpcm_a_ram.begin(), iface.adpcm_a_ram.end(), 0);
     std::fill(iface.adpcm_b_ram.begin(), iface.adpcm_b_ram.end(), 0);
     g_ext_reads_a = g_ext_reads_b = g_ext_writes_b = 0;
@@ -237,6 +307,7 @@ extern "C" void opna_reset(void)
 extern "C" void opna_write(int bank, int addr, int value)
 {
     if (!ensure_init()) return;
+    render_pending();           /* frames before this write use the old state */
     if (bank == 0) {
         chip.write_address((uint8_t)addr);
         chip.write_data((uint8_t)value);
@@ -255,6 +326,7 @@ extern "C" int opna_status_hi(void)
      * Note this reads EOS as set before any key-on and BRDY as
      * clear, unlike the live chip. */
     if (!ensure_init()) return 0x04;
+    render_pending();           /* status reflects every elapsed frame */
     return chip.read_status_hi();
 }
 
@@ -265,5 +337,12 @@ extern "C" void opna_advance(long cpu_cycles)
     long frames = (long)(frame_acc / CPU_CLOCK);
     frame_acc %= CPU_CLOCK;
     if (frames > HOST_RATE) frames = HOST_RATE;   /* bound pathological deltas */
-    for (long i = 0; i < frames; i++) push_frame();
+    pending_frames += frames;
+    /* The third condition keeps chunk delivery on the same advance as
+     * the unbatched renderer: once the owed frames complete a 512-frame
+     * output chunk they are rendered now, so the chunk is not left
+     * unpublished across a pause or after the engine thread exits. */
+    if (pending_frames >= PENDING_MAX || trace_audio ||
+        outfill + pending_frames >= 512)
+        render_pending();
 }
