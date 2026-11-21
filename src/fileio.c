@@ -272,7 +272,8 @@ void stmt_bload(void)
          * wrong shifts position-dependent code: NEOMSC's header says
          * 0x9900, and loading it at 0x9800 broke every absolute
          * reference inside it (found via a QUASI88 state dump). */
-        long cap = 1L << 16, n = 0;
+        /* room for the header on top of a maximum-range payload */
+        long cap = (1L << 16) + 4, n = 0;
         unsigned char *buf = (unsigned char *)malloc((size_t)cap);
         if (!buf) { fclose(fp); berror(E_OUT_OF_MEM); }
         buf[n++] = (unsigned char)c;
@@ -280,12 +281,25 @@ void stmt_bload(void)
         if (n >= 4) {
             unsigned lad = (unsigned)buf[0] | ((unsigned)buf[1] << 8);
             unsigned ead = (unsigned)buf[2] | ((unsigned)buf[3] << 8);
-            if (lad && lad < ead && (long)(ead - lad) <= n - 4) {
+            if (lad && lad <= ead && (long)(ead - lad + 1) <= n - 4) {
                 if (off < 0) off = (long)lad;
                 memmove(buf, buf + 4, (size_t)(n - 4));
-                n -= 4;
+                /* Load only the header's declared range, not the
+                 * rest of the file: a file taken from a disk image
+                 * is padded to whole 256-byte sectors, and the
+                 * padding used to overwrite up to 255 bytes past
+                 * the end address. The PC-88 header stores an end
+                 * ADDRESS (unlike the PC-98 0xFD format above,
+                 * which stores a length), and address ranges in
+                 * this format family are end-inclusive, so the
+                 * payload is ead - lad + 1 bytes; the check above
+                 * keeps that within what the file holds. (For
+                 * NEOMSC both conventions give identical memory:
+                 * the byte at ead is 0x00 and RAM starts zeroed.) */
+                n = (long)(ead - lad + 1);
             }
         }
+        if (n > (1L << 16)) n = 1L << 16;   /* raw load: 64 KiB as before */
         if (off < 0) off = p8_mem_top ? (long)((p8_mem_top + 1) & 0xFFFF) : 0x8000L;
         for (i = 0; i < n; i++) hal_poke(seg, (unsigned)(off + i), buf[i]);
         free(buf);

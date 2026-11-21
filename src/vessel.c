@@ -50,6 +50,14 @@ static int tracing(void)
     return vtrace;
 }
 
+/* P8P_TRACE_SP, read once: the run loop tests it on every step. */
+static int trace_sp(void)
+{
+    static int v = -1;
+    if (v < 0) v = getenv("P8P_TRACE_SP") != 0;
+    return v;
+}
+
 /* returns 1 the first time bit n of map is tested */
 static int first_time(unsigned char *map, unsigned n)
 {
@@ -448,6 +456,17 @@ static int intr_level = 7;              /* port E4 priority level: the
                                          * intr model; PMD's mstop drops
                                          * the level to 2 to silence the
                                          * sequencer, mstart raises 5) */
+static int intr_mask = 0xFF;            /* port E6 interrupt mask, 1 =
+                                         * enabled: bit 0 RTC, bit 1 VSYNC,
+                                         * bit 2 SIO (QUASI88 pc88main.cpp
+                                         * case 0xe6). Power-on here is
+                                         * "nothing masked", the state a
+                                         * booted BASIC leaves. The sound
+                                         * interrupt is NOT in this port:
+                                         * its mask is port 0x32 bit 7
+                                         * (SINTM, 1 = masked). */
+static void vrtc_retract(void);         /* defined with the interrupt model
+                                         * below; the E6 write calls it */
 static unsigned long alu_buf = 0;       /* ALU read latch (32-bit) */
 
 static int vram_way(void)               /* 0 = RAM, 1 = bank, 2 = ALU */
@@ -562,6 +581,30 @@ static unsigned char opn_reg[2][256];
 static unsigned long opn_nwrite[256];   /* bank-0 write counts */
 static unsigned long opn_nwrite1[256];  /* bank-1 write counts */
 static int tb_flag = 0;                 /* Timer B status flag */
+static int tb_line = 0;                 /* current level of the sound
+                                         * interrupt line into the
+                                         * controller (tb_line_update) */
+static int tb_due = 0;                  /* controller's latched sound request */
+
+/* Sound interrupt line as the controller sees it: the chip's Timer B
+ * request (flag set, IRQ enable B = reg 0x27 bit 3) masked by port
+ * 0x32 bit 7 (SINTM) BEFORE the controller, which latches the rising
+ * edge (QUASI88's model). An overflow under SINTM reaches the
+ * controller only if the flag is still standing when the guest
+ * unmasks, and an edge already latched survives a later SINTM.
+ *
+ * Must be called at every point where one of the line's inputs
+ * changes (overflow, reg 0x27 write, port 0x32 write), not only once
+ * per irq_advance: an acknowledge and the next overflow can both fall
+ * between two irq_advance samplings, and the drop in between is what
+ * makes that overflow a new edge. All paths share tb_line, so a rise
+ * latched at a write is not latched again by the next sampling. */
+static void tb_line_update(void)
+{
+    int line = tb_flag && !(misc_port[0x32] & 0x80);
+    if (line && !tb_line) tb_due = 1;
+    tb_line = line;
+}
 
 static void opn_write(int bank, int addr, int v)
 {
@@ -570,7 +613,10 @@ static void opn_write(int bank, int addr, int v)
     if (bank == 1) { opn_nwrite1[addr]++; return; }
     if (bank == 0) {
         opn_nwrite[addr]++;
-        if (addr == 0x27 && (v & 0x20)) tb_flag = 0;    /* RST B (bit 5) */
+        if (addr == 0x27) {
+            if (v & 0x20) tb_flag = 0;                  /* RST B (bit 5) */
+            tb_line_update();   /* flag reset / IRQ enable B change */
+        }
         if (tracing() && (addr == 0x26 || addr == 0x27))
             fprintf(stderr, "VESSEL OPN reg %02X <- %02X\n", addr, v);
     }
@@ -678,9 +724,21 @@ void vessel_port_out(int port, int v)
      * and the PCM part played silently. */
     case 0xAC: opn_addr[1] = v; break;
     case 0xAD: opn_write(1, opn_addr[1], v); break;
-    case 0x31: case 0x32: case 0x34: case 0x35: misc_port[port] = (unsigned char)v; break;
+    case 0x31: case 0x34: case 0x35: misc_port[port] = (unsigned char)v; break;
+    case 0x32:
+        misc_port[port] = (unsigned char)v;
+        tb_line_update();       /* SINTM (bit 7) gates the sound line */
+        break;
     case 0x70: window_base = (unsigned)(v & 0xFF) << 8; break;
     case 0xE4: intr_level = (v & 0x08) ? 7 : (v & 0x07); break;
+    /* Interrupt mask. Masking VSYNC also drops a request that is
+     * already latched (QUASI88: VSYNC_flag = false) - including one
+     * already queued with the CPU core but not yet accepted - and
+     * none is latched while it stays masked (irq_advance). */
+    case 0xE6:
+        intr_mask = v & 0xFF;
+        if (!(intr_mask & 0x02)) vrtc_retract();
+        break;
     case 0xE8: kanji_addr[0] = (unsigned short)((kanji_addr[0] & 0xFF00) | (v & 0xFF)); break;
     case 0xE9: kanji_addr[0] = (unsigned short)((kanji_addr[0] & 0x00FF) | ((v & 0xFF) << 8)); break;
     case 0xEC: kanji_addr[1] = (unsigned short)((kanji_addr[1] & 0xFF00) | (v & 0xFF)); break;
@@ -1021,7 +1079,8 @@ static int in_run = 0;
 static unsigned long last_cyc = 0;
 static long vrtc_left = VRTC_PERIOD;
 static long tb_left = 0;
-static int vrtc_due = 0, tb_due = 0;
+static int vrtc_due = 0;                    /* tb_due: with tb_line above */
+static long run_poll_left = PUMP_SLICE;     /* run-loop time to the next hal_poll */
 static int slot_vrtc_seen = 0, slot_opn_seen = 0;
 
 static long tb_period(void)
@@ -1049,23 +1108,34 @@ static void irq_advance(long cycles)
 {
     opna_advance(cycles);               /* audio rendering follows the same clock */
     vrtc_left -= cycles;
-    if (vrtc_left <= 0) { vrtc_left += VRTC_PERIOD; vrtc_due = 1; }
+    if (vrtc_left <= 0) {
+        vrtc_left += VRTC_PERIOD;
+        if (intr_mask & 0x02) vrtc_due = 1;     /* port E6: VSYNC enabled */
+    }
     if (opn_reg[0][0x27] & 0x02) {              /* Timer B enabled */
         if (tb_left <= 0) tb_left = tb_period();
         tb_left -= cycles;
         if (tb_left <= 0) {
             tb_left += tb_period();
-            tb_flag = 1;
-            if (opn_reg[0][0x27] & 0x08) tb_due = 1;    /* IRQ enable B (bit 3) */
+            /* The IRQ-enable bit (reg 0x27 bit 3) gates the flag
+             * itself, as in QUASI88/ymfm: an overflow while the
+             * guest has Timer B interrupts disabled leaves no
+             * standing flag, so enabling the IRQ later cannot
+             * deliver a stale request. */
+            if (opn_reg[0][0x27] & 0x08) tb_flag = 1;
         }
     }
+    tb_line_update();
 }
 
 /* Queue at most one interrupt with the CPU core (Timer B first).
  * Deliveries are gated by the port-E4 priority level, as on hardware:
  * the sound interrupt needs level >= 5, VSYNC >= 2; a request whose
  * level is too low stays pending (the PIC latches it) until the level
- * rises. */
+ * rises. Both source masks act where the request is latched, not
+ * here: SINTM (port 0x32 bit 7) gates the sound line ahead of the
+ * latch (tb_line_update), and the port-E6 VSYNC mask drops a masked
+ * VSYNC (irq_advance and the port write) instead of deferring it. */
 static void irq_service(void)
 {
     unsigned h;
@@ -1076,7 +1146,7 @@ static void irq_service(void)
             tb_due = 0;
             if (!slot_opn_seen && tracing()) fprintf(stderr, "VESSEL OPN int handler %04X\n", h);
             slot_opn_seen = 1;
-            if (getenv("P8P_TRACE_SP") && mem_bank != 3)
+            if (trace_sp() && mem_bank != 3)
                 fprintf(stderr, "IRQFIRE bank=%d alu=%d pc=%04X\n",
                         mem_bank, vram_way(), (unsigned)cpu.pc);
             z80_gen_int(&cpu, OPN_VEC);
@@ -1095,6 +1165,16 @@ static void irq_service(void)
         }
         vrtc_due = 0;
     }
+}
+
+/* Port E6 bit 1 cleared: drop the VSYNC request wherever it stands -
+ * the controller latch, and a VRTC vector irq_service already queued
+ * with the CPU core that the guest (under DI) has not accepted yet.
+ * A queued Timer B vector is left alone. */
+static void vrtc_retract(void)
+{
+    vrtc_due = 0;
+    if (cpu.int_pending && cpu.int_data == VRTC_VEC) cpu.int_pending = 0;
 }
 
 /* The machine setup proper, shared by the lazy first-use path
@@ -1184,6 +1264,7 @@ void vessel_session_reset(void)
     memset(misc_port, 0, sizeof(misc_port));
     kanji_addr[0] = kanji_addr[1] = 0;
     intr_level = 7;
+    intr_mask = 0xFF;
     alu_buf = 0;
     /* OPNA register shadow, Timer B, write counters */
     opn_addr[0] = opn_addr[1] = 0;
@@ -1191,14 +1272,16 @@ void vessel_session_reset(void)
     memset(opn_nwrite, 0, sizeof(opn_nwrite));
     memset(opn_nwrite1, 0, sizeof(opn_nwrite1));
     tb_flag = 0;
-    /* interrupt model. in_run is cleared defensively: no path bails
-     * out (p8_bail's longjmp) from inside run_loop today, but one
-     * that did would leave it set and keep vessel_pump off for the
-     * whole next session. */
+    tb_line = 0;
+    /* interrupt model. in_run must be cleared: a stop request taken
+     * by run_poll's hal_poll bails out (p8_bail's longjmp) from
+     * inside run_loop, which leaves it set and would keep vessel_pump
+     * off for the whole next session. */
     in_run = 0;
     last_cyc = 0;
     vrtc_left = VRTC_PERIOD; tb_left = 0;
     vrtc_due = 0; tb_due = 0;
+    run_poll_left = PUMP_SLICE;
     slot_vrtc_seen = 0; slot_opn_seen = 0;
     /* CPU, GVRAM, bank, port defaults, palette, window, RAM stubs */
     pump_live = 0;
@@ -1208,6 +1291,79 @@ void vessel_session_reset(void)
 
 static unsigned short pc_ring[64];
 static int pc_ring_pos;
+
+/* HALT = wait for an interrupt. Instead of stepping the halted CPU's
+ * NOPs one by one, emulated time jumps to the next timer event (the
+ * VRTC tick, or the Timer B overflow when Timer B runs) and goes
+ * through the same irq_advance / irq_service accounting as executed
+ * code, so the VRTC cadence, tb_left and audio rendering stay on one
+ * clock. Jumps are rounded up to 4 T-states, the halted CPU's NOP
+ * granularity. Returns 1 once an interrupt is queued (the next
+ * z80_step accepts it and execution resumes after the HALT), 0 when
+ * the HALT cannot end: interrupts are disabled (there is no NMI
+ * source), or nothing became deliverable within HALT_WAIT_CAP cycles
+ * of emulated time (level too low, source masked, Timer B stopped,
+ * empty handler slot). The caller then stops the run, as every HALT
+ * did before.
+ *
+ * Halted time is charged to the run loop's poll budget (run_poll)
+ * like executed time. */
+#define HALT_WAIT_CAP 4000000L      /* 1 s of emulated time = 60 VRTC ticks */
+
+/* Time the run loop consumes - executed instructions and HALT
+ * fast-forward alike - is emulated time passing inside one
+ * machine-code call, where exec_loop's per-statement poll never runs:
+ * the same situation as vessel_burn's sector wait, and handled the
+ * same way. Every cycle is charged to one budget and the HAL gets its
+ * poll once per PUMP_SLICE of it (counted across calls, so an EI;HALT
+ * loop is covered whether its interrupts end the HALT in halt_wait or
+ * are accepted inside the HALT's own step), which paces the embedded
+ * engine against the audio clock and lets a stop or pause request
+ * land. Call it with the interrupt state settled (after irq_service):
+ * the poll may not return (p8_bail). */
+static void run_poll(long cycles)
+{
+    for (run_poll_left -= cycles; run_poll_left <= 0; run_poll_left += PUMP_SLICE)
+        hal_poll();
+}
+
+/* One CPU step with its time accounting: emulated time follows the
+ * CPU's own cycle counter. */
+static void cpu_step(void)
+{
+    unsigned long now;
+    long dc;
+    z80_step(&cpu);
+    now = cpu.cyc;
+    dc = (long)(now - last_cyc);
+    last_cyc = now;
+    if (dc > 0) irq_advance(dc);
+    irq_service();
+    if (dc > 0) run_poll(dc);
+}
+
+static int halt_wait(void)
+{
+    long waited = 0;
+    if (!cpu.iff1 && !cpu.iff_delay) return 0;
+    while (!cpu.int_pending) {
+        long dt = vrtc_left;
+        if (waited >= HALT_WAIT_CAP) return 0;
+        if (opn_reg[0][0x27] & 0x02) {          /* Timer B running */
+            long tb = tb_left > 0 ? tb_left : tb_period();
+            if (tb < dt) dt = tb;
+        }
+        if (dt < 4) dt = 4;
+        dt = (dt + 3) & ~3L;
+        cpu.cyc += (unsigned long)dt;
+        last_cyc = cpu.cyc;
+        irq_advance(dt);
+        irq_service();
+        waited += dt;
+        run_poll(dt);
+    }
+    return 1;
+}
 
 static long run_loop_body(void)
 {
@@ -1220,30 +1376,34 @@ static long run_loop_body(void)
         if (t < 0) return n;
         if (t > 0) continue;
         if (steps) fprintf(stderr, "STEP %04X %02X SP=%04X\n", (unsigned)cpu.pc, hal_peek(0, cpu.pc), (unsigned)cpu.sp);
-        if (getenv("P8P_TRACE_SP") && (cpu.pc == 0xA4A9 || cpu.pc == 0xA4EA
+        if (trace_sp() && (cpu.pc == 0xA4A9 || cpu.pc == 0xA4EA
             || cpu.pc == 0xA566 || cpu.pc == 0xA4D6 || cpu.pc == 0x8F03))
             fprintf(stderr, "SPCHK pc=%04X sp=%04X top=%04X iy=%04X\n",
                     (unsigned)cpu.pc, (unsigned)cpu.sp, rd16(cpu.sp),
                     (unsigned)cpu.iy);
         pc_ring[pc_ring_pos & 63] = (unsigned short)cpu.pc; pc_ring_pos++;
-        if (getenv("P8P_TRACE_SP")) {
+        if (trace_sp()) {
             unsigned h = rd16((IRQ_PAGE << 8) | OPN_VEC);
             if (cpu.pc == h && h >= 0x8000 && pc_ring_pos >= 2
                 && pc_ring[(pc_ring_pos - 2) & 63] != (unsigned short)h)
                 fprintf(stderr, "IRQACPT from=%04X bank=%d alu=%d\n",
                         pc_ring[(pc_ring_pos - 2) & 63], mem_bank, vram_way());
         }
-        z80_step(&cpu);
-        {   /* emulated time follows the CPU's own cycle counter */
-            unsigned long now = cpu.cyc;
-            long dc = (long)(now - last_cyc);
-            last_cyc = now;
-            if (dc > 0) irq_advance(dc);
-        }
-        irq_service();
+        cpu_step();
         if (cpu.halted) {
-            fprintf(stderr, "VESSEL HALT at %04X, stopped\n", (unsigned)cpu.pc);
-            return n;
+            if (!halt_wait()) {
+                fprintf(stderr, "VESSEL HALT at %04X with no deliverable"
+                        " interrupt, stopped\n", (unsigned)cpu.pc);
+                return n;
+            }
+            /* The wakeup vector is queued but the CPU is still halted
+             * with PC at the continuation address. Let the core accept
+             * it now, before the next iteration's trap() looks at that
+             * PC: a HALT at 0xFFFE continues at the sentinel, and
+             * trap() would end the run with the vector still pending.
+             * (More than one step only while an EI delay runs out;
+             * halt_wait returned 1, so acceptance is certain.) */
+            while (cpu.halted && cpu.int_pending) cpu_step();
         }
     }
     fprintf(stderr, "VESSEL step cap reached at %04X, stopped"
@@ -1252,7 +1412,7 @@ static long run_loop_body(void)
             (unsigned)((cpu.h << 8) | cpu.l),
             (unsigned)((cpu.d << 8) | cpu.e),
             (unsigned)((cpu.b << 8) | cpu.c), (unsigned)cpu.sp);
-    if (getenv("P8P_TRACE_SP")) {   /* recent-PC ring, for spin diagnosis */
+    if (trace_sp()) {   /* recent-PC ring, for spin diagnosis */
         int i;
         fprintf(stderr, "RECENT:");
         for (i = 0; i < 64; i++)

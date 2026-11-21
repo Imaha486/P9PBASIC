@@ -51,6 +51,20 @@ static int scan_dir(struct ent *ents, int max)
                 for (k = 6; k < 9 && e[k] != ' '; k++) ents[n].name[o++] = (char)e[k];
             }
             ents[n].name[o] = 0;
+            /* The name becomes a host file name in the scratch dir
+             * (materialize.c), and the image is untrusted: path
+             * separators, control characters and a leading '.' could
+             * name something outside it ("../x", "/a"). Such an entry
+             * is skipped outright - neither listed nor readable -
+             * rather than renamed: a replacement character could make
+             * two entries collide ("A/B" and "A_B") and serve the
+             * wrong file. Every reader of the directory goes through
+             * this function, so they all agree on what exists. */
+            for (k = 0; k < o; k++) {
+                unsigned char ch = (unsigned char)ents[n].name[k];
+                if (ch < 0x20 || ch == 0x7F || ch == '/' || ch == '\\') break;
+            }
+            if (k < o || ents[n].name[0] == '.') continue;
             ents[n].attr = e[9];
             ents[n].start = e[10];
             n++;
