@@ -146,16 +146,26 @@ void stmt_screen(void)
     g_apage = ap; g_dpage = dp;
     hal_gpage(ap, (dp & 1) ? 0 : (dp & 2) ? 1 : 0);
     if (sw >= 0) {
-        /* PC-88 SCREEN display switch: 0 = graphics only,
-         * 1 = text + graphics overlaid, 2 = text only.
-         * (Verified against MA2026 on QUASI88: the attract
-         * under SCREEN 0,0 shows the CG with the *TITLE panel
-         * plotted in GVRAM and the text screen's song list
-         * hidden, while *SELECT under SCREEN 0,2 shows the
-         * list alone on black. An earlier mapping had sw=2
-         * overlaid, leaving the CG visible under the list.) */
-        g_on = (sw != 2);
-        hal_ton(sw != 0);
+        /* PC-88 SCREEN 2nd parameter: a 2-bit switch pair (NEC
+         * PC-8801mkIIMR N88-BASIC Reference Manual, SCREEN):
+         *   bit value 2 = graphics mask: while ON the graphics
+         *     patterns are temporarily hidden; their content is
+         *     preserved and reappears when the mask turns off.
+         *   bit value 1 = fast write: no display effect
+         *     (meaningless in V2 mode).
+         * SCREEN never affects the TEXT plane -- text is always
+         * displayed. So graphics are shown iff !(sw & 2):
+         *   sw=0 text + graphics      sw=1 text + graphics
+         *   sw=2 text only (masked)   sw=3 text only (masked)
+         * Evidence from a genuine M88 recording of MA2026: under
+         * SCREEN 0,0 the title shows the PRINTed header line above
+         * the XDD graphics (and the playback panel coexists with
+         * text-plane indicators); under SCREEN 0,2 (*SELECT) the
+         * list stands alone, the graphics preserved underneath.
+         * (An earlier mapping, taken from QUASI88 observation --
+         * 0 = graphics only, 1 = overlay, 2 = text only -- hid the
+         * text plane at sw=0 and showed graphics at sw=3.) */
+        g_on = !(sw & 2);
     }
     hal_gon(g_on && dp != 0);
 }

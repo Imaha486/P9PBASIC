@@ -1784,6 +1784,10 @@ static int xde_image_ok(int img)
     return 0;
 }
 
+/* Text-VRAM cell of NEOMSC's service-1 track countdown: row 0,
+ * column 78 of the guest text image at 0xF3C8 (two cells). */
+#define XDE_COUNT_CELL 0xF416
+
 /* FFDE service 1 equivalent: bulk-load `tracks` logical tracks
  * starting at logical track `ltrack` from disk image `img` of the
  * P8P_DISK file into the OPNA's ADPCM-B sample DRAM (the Sound
@@ -1792,14 +1796,30 @@ static int xde_image_ok(int img)
  * starting at DRAM offset 0. The ADPCM-A side is the chip's rhythm
  * ROM and is not a load target. Returns the number of sectors
  * stored in DRAM: a load past the 256 KiB capacity is still read
- * and timed like the genuine burst, but the excess is dropped. */
+ * and timed like the genuine burst, but the excess is dropped.
+ * Like the genuine loop it also shows the track countdown at
+ * XDE_COUNT_CELL (docs/APPROXIMATIONS.md item 30). */
 int vessel_dram_load(int img, int ltrack, int tracks)
 {
     unsigned char buf[256];
     int n = 0, stored = 0, t, r, b;
     unsigned long dst = 0;
+    int left = tracks;      /* NEOMSC's remaining-track counter */
     if (!xde_image_ok(img)) return 0;
-    for (t = ltrack; t < ltrack + tracks; t++) {
+    for (t = ltrack; left > 0; t++, left--) {
+        /* NEOMSC's transfer loop shows its progress: before each
+         * track it writes (remaining - 1) as two uppercase hex
+         * digits into the text VRAM at 0xF416/0xF417 (row 0,
+         * columns 78-79), so RT=28 counts "1B" down to "00" and the
+         * "00" stays until the program redraws row 0. Same
+         * formatter as the genuine one: nibble, +7 if >= 10, +'0'.
+         * Guest RAM, so it goes through hal_poke like every other
+         * vessel write (the engine merges the image for display). */
+        if (left >= 1) {
+            int v = (left - 1) & 0xFF, hi = v >> 4, lo = v & 0x0F;
+            hal_poke(0, XDE_COUNT_CELL,     (hi >= 10 ? hi + 7 : hi) + 0x30);
+            hal_poke(0, XDE_COUNT_CELL + 1, (lo >= 10 ? lo + 7 : lo) + 0x30);
+        }
         for (r = 1; r <= 16; r++) {
             if (!d88_read_sector_img(img, t, r, buf)) return stored;
             if (dst < 256UL * 1024) stored++;
