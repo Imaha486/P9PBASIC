@@ -37,6 +37,7 @@ typedef struct {
 
 enum {
     T_ALL = 0x81, T_AND, T_APOS, T_APPEND, T_AS, T_AUTO, T_BASE, T_BEEP, T_BLOAD, T_BSAVE, T_CALL, T_CHAIN, T_CIRCLE, T_CLEAR, T_CLOSE, T_CLS, T_COLOR, T_COMMON, T_CONSOLE, T_CONT, T_DATA, T_DATE, T_DEF, T_DEFDBL, T_DEFINT, T_DEFSNG, T_DEFSTR, T_DELETE, T_DIM, T_EDIT, T_ELSE, T_END, T_EQV, T_ERASE, T_ERL, T_ERR, T_ERROR, T_FIELD, T_FILES, T_FN, T_FOR, T_GET, T_GOSUB, T_GOTO, T_IF, T_IMP, T_INPUT, T_KEY, T_KILL, T_LET, T_LINE, T_LIST, T_LLIST, T_LOAD, T_LOCATE, T_LPRINT, T_LSET, T_MERGE, T_MID, T_MOD, T_NAME, T_NEW, T_NEXT, T_NOT, T_OFF, T_ON, T_OPEN, T_OPTION, T_OR, T_OUT, T_OUTPUT, T_PAINT, T_PLAY, T_POKE, T_PRESET, T_PRINT, T_PSET, T_PUT, T_RANDOMIZE, T_READ, T_REM, T_RENUM, T_RESTORE, T_RESUME, T_RETURN, T_RSET, T_RUN, T_SAVE, T_SCREEN, T_SEG, T_SOUND, T_SPC, T_STEP, T_STOP, T_SWAP, T_SYSTEM, T_TAB, T_THEN, T_TIME, T_TO, T_TROFF, T_TRON, T_USING, T_USR, T_VIEW, T_WAIT, T_WEND, T_WHILE, T_WIDTH, T_WINDOW, T_WRITE, T_XOR,
+    T_XDD, T_XDE, T_XDF,
     T_LAST_STMT
 };
 
@@ -234,6 +235,7 @@ extern int out_col;
 /* misc */
 void list_program(u16 a, u16 b, FILE *fp);
 extern unsigned def_seg;
+extern unsigned p8_mem_top;   /* CLEAR ,m (0 = not set) */
 extern int trace_on;
 void stmt_key(void);
 void key_traps_check(void);

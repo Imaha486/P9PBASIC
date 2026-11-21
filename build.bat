@@ -1,4 +1,12 @@
 @echo off
+rem NOT SUPPORTED in P8PBASIC -- inherited unchanged from P9PBASIC.
+rem P8PBASIC's interpreter calls the Z80 vessel throughout and the
+rem vessel has no 16-bit DOS target, so this build cannot link.
+rem Use build-host.sh / build-embed.sh. See docs/APPROXIMATIONS.md
+rem audit item G-5.
+echo build.bat: the DOS build is a P9PBASIC target and is not supported in P8PBASIC.
+echo Use build-host.sh or build-embed.sh instead.
+exit /b 1
 rem P9PBASIC.EXE build script for Open Watcom 2.0 on Windows
 rem   https://github.com/open-watcom/open-watcom-v2
 if "%WATCOM%"=="" set WATCOM=C:\WATCOM

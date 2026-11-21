@@ -1,11 +1,13 @@
 /* exec.c - program storage, statement execution, direct mode */
 #include "basic.h"
+#include "vessel.h"
 #include <ctype.h>
 #include <math.h>
 
 void fn_clear(void);
 void stmt_deffn(void);
 void rnd_randomize(long n);
+void rnd_reset(void);
 void option_base_set(int b);
 void *array_base(const char *name, int type, long *bytes);
 void print_using_dummy(void);
@@ -24,6 +26,7 @@ int exit_after_run = 0;
 unsigned def_seg = 0;
 int trace_on = 0;
 int ok_needed = 1;
+unsigned p8_mem_top = 0;   /* CLEAR ,m : top of BASIC memory (0 = never set) */
 
 #define PROG_MAX 0xFF00u
 static u8 *cur_lp;         /* current line header (program) */
@@ -414,6 +417,8 @@ static void exec_loop(void)
     }
     for (;;) {
         u8 c;
+        vessel_pump();      /* PMD playback advances while BASIC runs */
+        hal_poll();         /* embedded hosts may bail out here */
         str_temp_reset();
         if (running && hal_breakflag()) {
             if (exit_after_run) { /* stop running file: fall to editor */ exit_after_run = 0; }
@@ -1223,8 +1228,8 @@ static void stmt_renum(void)
 /* ---------------- misc statements ---------------- */
 static void stmt_clear(void)
 {
-    /* CLEAR [n[,m]] : arguments ignored */
-    if (!at_stmt_end()) { if (peekc() != ',') eval_long(); if (accept(',')) eval_long(); if (accept(',')) eval_long(); }
+    /* CLEAR [n[,m]] : only m (memory top) is recorded, for BLOAD's default address */
+    if (!at_stmt_end()) { if (peekc() != ',') eval_long(); if (accept(',')) p8_mem_top = (unsigned)(eval_long() & 0xFFFF); if (accept(',')) eval_long(); }
     var_clear_all();
     fn_clear();
     file_close_all();
@@ -1332,6 +1337,200 @@ static void stmt_out(void)
     long p; int v;
     p = eval_long(); expect(','); v = eval_int();
     hal_outp((unsigned)p, v & 0xFF);
+}
+
+/* XDD / XDE / XDF: stubs for PC-88 Z80-driver extension statements.
+ * Arguments are evaluated (for validation) and discarded.  XDF takes a bare
+ * command name (letters, stored as plain characters by the tokenizer) before
+ * the list.  Set P8P_TRACE_EXT to log each call to stderr. */
+/* Scratch area for synthesized PC-88 token streams (the Z80 extension
+ * handlers parse their arguments from a token stream, so the relay
+ * re-encodes the interpreter's evaluated arguments into one). */
+#define EXT_STREAM 0x8F00
+
+static unsigned ext_put(unsigned p, int byte)
+{
+    hal_poke(0, p, byte);
+    return (p + 1) & 0xFFFF;
+}
+
+static unsigned ext_put_num(unsigned p, long v)
+{
+    unsigned u = (unsigned)(v & 0xFFFF);
+    if (u <= 9) return ext_put(p, 0x11 + (int)u);   /* digit token */
+    p = ext_put(p, 0x1C);                            /* int16 constant */
+    p = ext_put(p, (int)(u & 0xFF));
+    return ext_put(p, (int)(u >> 8));
+}
+
+/* Build a synthesized token stream for an extension statement:
+ * [FF][sub][space] arg0 [, arg1] ... [00]. Numbers are re-encoded as
+ * token literals; a string argument becomes a quoted literal. The
+ * handlers parse their arguments out of the stream (via the RST 8
+ * svc 0x2C trap), exactly as on hardware. Returns the address of the
+ * first argument byte (what HL points at on handler entry). */
+static unsigned ext_build_stream(int sub, const long *nums,
+                                 const int *arg_is_str,
+                                 const char (*arg_str)[128],
+                                 const int *arg_slen, int narg,
+                                 const int *arg_sep)
+{
+    unsigned p = EXT_STREAM;
+    int i;
+    p = ext_put(p, 0xFF);
+    p = ext_put(p, sub);
+    p = ext_put(p, 0x20);
+    for (i = 0; i < narg; i++) {
+        /* Preserve the source separator: NEOMSC's FFDD handler
+         * dispatches on it -- ',' continues with a direct argument
+         * (0x9F65), ';' introduces a data reference (song, type)
+         * resolved through its song table. Flattening ';' to ','
+         * sent data references down the direct path, where the song
+         * index was misread as a string pointer and nothing plotted. */
+        if (i) p = ext_put(p, arg_sep ? (unsigned)arg_sep[i] : 0x2C);
+        if (arg_is_str[i]) {
+            int j;
+            p = ext_put(p, 0x22);
+            for (j = 0; j < arg_slen[i]; j++)
+                p = ext_put(p, (unsigned char)arg_str[i][j]);
+            p = ext_put(p, 0x22);
+        } else {
+            p = ext_put_num(p, nums[i]);
+        }
+    }
+    ext_put(p, 0x00);
+    return EXT_STREAM + 3;
+}
+
+static void stmt_ext(int which)
+{
+    static const char *nm[3] = { "XDD", "XDE", "XDF" };
+    char cmd[16];
+    long nums[16];
+    int arg_sep[16];
+    int pending_sep = 0x2C;
+    int arg_is_str[16];
+    static char arg_str[16][128];
+    int arg_slen[16];
+    int nnum = 0;
+    int n = 0, args = 1;
+    int tr = getenv("P8P_TRACE_EXT") != 0;
+    cmd[0] = 0;
+    if (which == 2) {
+        while (*txtptr == ' ') txtptr++;
+        while (isalpha(*txtptr)) {
+            if (n < (int)sizeof(cmd) - 1) cmd[n++] = (char)toupper(*txtptr);
+            txtptr++;
+        }
+        cmd[n] = 0;
+        if (n) args = accept(',');
+    }
+    if (tr) {
+        fprintf(stderr, "%s", nm[which]);
+        if (which == 2) fprintf(stderr, " %s", cmd);
+    }
+    while (args) {
+        VAL v;
+        if (at_stmt_end()) break;
+        eval(&v);
+        if (nnum < 16) arg_sep[nnum] = pending_sep;
+        if (nnum < 16) {
+            if (v.type == T_STR) {
+                int L = (int)v.u.s.len;
+                if (L > 127) L = 127;
+                arg_is_str[nnum] = 1;
+                arg_slen[nnum] = L;
+                if (L > 0 && v.u.s.p) memcpy(arg_str[nnum], v.u.s.p, (size_t)L);
+                arg_str[nnum][L] = 0;
+                nums[nnum] = 0;
+            } else {
+                arg_is_str[nnum] = 0;
+                arg_slen[nnum] = 0;
+                nums[nnum] = (long)val_to_dbl(&v);
+            }
+            nnum++;
+        }
+        if (tr) {
+            if (v.type == T_STR)
+                fprintf(stderr, " \"%.*s\"", (int)v.u.s.len, v.u.s.p ? v.u.s.p : "");
+            else
+                fprintf(stderr, " %g", val_to_dbl(&v));
+        }
+        if (accept(',')) { pending_sep = 0x2C; continue; }
+        if (accept(';')) { pending_sep = 0x3B; continue; }
+        break;
+    }
+    if (tr) fputc('\n', stderr);
+
+    /* The relays jump to whatever handler the guest hooked into the
+     * statement's EEA vector (vessel_relay_target reads the vector's
+     * JP), as the genuine interpreter does. With no handler hooked
+     * the statement does nothing for this call, and the vessel says
+     * so on stderr once per vector. For NEOMSC the targets are
+     * 0x9E5C / 0x994D / 0xA6DB (docs/NEOMSC-CONTRACT.md). */
+    if (which == 0 && nnum >= 1) {
+        /* XDD: relay to the FFDD handler (the EEA1 vector's target;
+         * BC = the vector address, HL = the first argument token,
+         * A = that token's byte — the convention the genuine
+         * interpreter uses, verified against QUASI88). */
+        unsigned target;
+        if (vessel_relay_target(0xEEA1, nm[0], &target)) {
+            unsigned hl = ext_build_stream(0xDD, nums, arg_is_str,
+                                           arg_str, arg_slen, nnum, arg_sep);
+            vessel_prime_arg(nums[0]);
+            vessel_call(target, (unsigned)hal_peek(0, hl), hl, 0xEEA1, 0);
+        }
+    } else if (which == 2 && cmd[0]) {
+        /* XDF: relay to the FFDF handler (the EEA7 vector's target;
+         * BC = the vector address, HL = the command letter, A = that
+         * letter — docs/NEOMSC-CONTRACT.md. Stock NEOMSC reloads A
+         * from (HL), but a handler dispatching on A needs it). */
+        unsigned target;
+        if (vessel_relay_target(0xEEA7, nm[2], &target)) {
+            unsigned p = EXT_STREAM, i;
+            p = ext_put(p, 0xFF); p = ext_put(p, 0xDF); p = ext_put(p, 0x20);
+            for (i = 0; cmd[i]; i++) p = ext_put(p, (unsigned char)cmd[i]);
+            for (n = 0; n < nnum; n++) {
+                p = ext_put(p, 0x2C);
+                p = ext_put_num(p, nums[n]);
+            }
+            ext_put(p, 0x00);
+            vessel_call(target, (unsigned char)cmd[0], EXT_STREAM + 3, 0xEEA7, 0);
+        }
+    } else if (which == 1 && nnum >= 1) {
+        /* XDE services with statement-level equivalents in the
+         * vessel: 0 = raw sector read into guest memory, 1 = the
+         * ADPCM block bulk load into the SB2 sample RAM. The
+         * second argument selects the bundled disk image (a .D88
+         * file can hold a multi-disk set; MA2026's songs live on
+         * image 1, everything else on image 0). Service 2
+         * (DRAM -> guest copy) is unreachable in MA2026's shipped
+         * configuration (MENU.ALP forces RD=1, so the per-song
+         * loads always take the service 0 path), and service 3 is
+         * the staff-roll text service; both stay trace-only. */
+        if (nums[0] == 0 && nnum >= 6)
+            vessel_disk_read((int)nums[1], (int)nums[2], (int)nums[3],
+                             (int)nums[4], (unsigned)(nums[5] & 0xFFFF));
+        else if (nums[0] == 1 && nnum >= 4)
+            vessel_dram_load((int)nums[1], (int)nums[2], (int)nums[3]);
+        else {
+            /* Other XDE services (2 = DRAM copy, 3 = staff roll):
+             * relay to the FFDE handler (the EEA4 vector's target;
+             * BC = the vector address, A = the first argument's
+             * token byte). HL deliberately differs from the genuine
+             * entry value 0xE69C: the vessel has no ROM text pointer
+             * of its own, so the RST 8 svc 0x2C / 0x11D3 traps parse
+             * the following arguments from HL, which therefore has to
+             * point at the first argument token as for XDD. */
+            unsigned target;
+            if (vessel_relay_target(0xEEA4, nm[1], &target)) {
+                unsigned hl = ext_build_stream(0xDE, nums, arg_is_str,
+                                               arg_str, arg_slen, nnum, arg_sep);
+                vessel_prime_arg(nums[0]);
+                vessel_call(target, (unsigned)hal_peek(0, hl), hl, 0xEEA4, 0);
+            }
+        }
+    }
 }
 
 static void stmt_wait(void)
@@ -1643,6 +1842,9 @@ static void exec_stmt(void)
     case T_POKE: stmt_poke(); break;
     case T_CONT: stmt_cont(); return;
     case T_OUT: stmt_out(); break;
+    case T_XDD: stmt_ext(0); break;
+    case T_XDE: stmt_ext(1); break;
+    case T_XDF: stmt_ext(2); break;
     case T_CLS: stmt_cls(); break;
     case T_WIDTH: stmt_width(); break;
     case T_ELSE: while (*txtptr) txtptr = skip_token(txtptr); return;
@@ -1869,10 +2071,16 @@ int prog_save(const char *fname)
     return 1;
 }
 
+/* Runs once per session (never per RUN). A process can host several
+ * sessions in turn (engine.c), so state that a RUN does not clear
+ * is put back to its initial value here. */
 void interp_init(void)
 {
+    free(prog_mem);             /* the previous session's program area (NULL on first init) */
     prog_mem = (u8 *)malloc(PROG_MAX + 4);
     if (!prog_mem) { puts("\x83\x81\x83\x82\x83\x8A\x82\xAA\x91\xAB\x82\xE8\x82\xDC\x82\xB9\x82\xF1");  /* メモリが足りません */ exit(1); }
     prog_mem[0] = prog_mem[1] = 0;
+    p8_mem_top = 0;             /* CLEAR ,m not given yet */
+    rnd_reset();
     def_seg = hal_dataseg();
 }

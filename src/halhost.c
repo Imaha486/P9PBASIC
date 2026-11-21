@@ -1,5 +1,6 @@
 /* halhost.c - host (Linux) HAL for testing the interpreter core */
 #include "basic.h"
+#include "vessel.h"
 #include <time.h>
 
 static unsigned short tv[25][80];
@@ -49,11 +50,24 @@ static void dump(void)
         }
         fclose(f);
     }
+    if (getenv("P8P_VRAMDUMP")) {
+        /* mirror tools/embed_test.c: dump the vessel's VRAM planes
+         * so host probes can verify Z80-side drawing (XDD, XDE 3) */
+        int b;
+        for (b = 0; b < 3; b++) {
+            char path[32];
+            FILE *f;
+            snprintf(path, sizeof(path), "vram%d.bin", b);
+            f = fopen(path, "wb");
+            if (f) { fwrite(vessel_vram_plane(b), 1, 0x4000, f); fclose(f); }
+        }
+    }
 }
 
 void hal_init(int f)
 {
     (void)f;
+    memset(kmatrix, 0xFF, sizeof(kmatrix));   /* idle = nothing pressed */
     keys = getenv("P9PKEYS");
     if (!keys) keys = "";
     atexit(dump);
@@ -74,6 +88,7 @@ void hal_trow(int y, const unsigned short *codes, const unsigned char *attrs, in
 
 void hal_cursor(int x, int y, int v, int ins) { (void)x; (void)y; (void)v; (void)ins; }
 void hal_width40(int on) { w40 = on; }
+void hal_gfx200(int on) { (void)on; }
 
 /* key script: chars; escapes \r \n \e(ESC) \s(STOP) \u \d \l \R(right) \1..\9 \0 (F1..F10) \w (wait 1 tick) */
 static int pending = -1;
@@ -126,8 +141,12 @@ void hal_idle(void)
     } else idle_count = 0;
 }
 
-int hal_inp(unsigned port) { (void)port; return 0xFF; }  /* E0h-ECh: no key pressed */
-void hal_outp(unsigned port, int val) { (void)port; (void)val; }
+/* BASIC's INP/OUT go through the vessel's PC-88 port model, so the
+ * interpreter and the Z80 see the same machine (sound board probe,
+ * disk subsystem, ...). Ports the model does not know read as 0xFF,
+ * which is also the idle keyboard matrix. */
+int hal_inp(unsigned port) { return vessel_port_in((int)(port & 0xFF)); }
+void hal_outp(unsigned port, int val) { vessel_port_out((int)(port & 0xFF), val); }
 int hal_peek(unsigned seg, unsigned off) { (void)seg; return memory[off & 0xFFFF]; }
 void hal_poke(unsigned seg, unsigned off, int v) { (void)seg; memory[off & 0xFFFF] = (unsigned char)v; }
 unsigned hal_dataseg(void) { return 0x1000; }
@@ -135,6 +154,7 @@ unsigned long hal_varptr(void *p) { return (unsigned long)((size_t)p & 0xFFFF) |
 void hal_call(unsigned seg, unsigned off) { (void)seg; (void)off; }
 
 void hal_gon(int on) { (void)on; }
+void hal_ton(int on) { (void)on; }
 void hal_gpage(int a, int d) { ap = a; (void)d; }
 void hal_gpset(int x, int y, int c) { if (x >= 0 && x < 640 && y >= 0 && y < 400) gv[ap][y][x] = (unsigned char)c; }
 int hal_gpoint(int x, int y) { if (x >= 0 && x < 640 && y >= 0 && y < 400) return gv[ap][y][x]; return -1; }
@@ -147,3 +167,5 @@ void hal_gettime(int *h, int *m, int *s) { *h = 12; *m = 34; *s = 56; }
 void hal_getdate(int *y, int *mo, int *d) { *y = 2026; *mo = 11; *d = 16; }
 void hal_settime(int h, int m, int s) { (void)h; (void)m; (void)s; }
 void hal_setdate(int y, int mo, int d) { (void)y; (void)mo; (void)d; }
+
+void hal_poll(void) { }

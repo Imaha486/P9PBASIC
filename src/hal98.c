@@ -232,6 +232,8 @@ void hal_trow(int y, const unsigned short *codes, const unsigned char *attrs, in
     }
 }
 
+void hal_gfx200(int on) { (void)on; }
+
 void hal_width40(int on)
 {
     w40 = on;
@@ -361,6 +363,7 @@ unsigned long hal_ticks(void)
 
 void hal_beep(int on) { outp(0x37, on ? 0x06 : 0x07); }
 void hal_idle(void) { }
+void hal_poll(void) { }
 
 /* ---------------- ports / memory ---------------- */
 int hal_inp(unsigned port)
@@ -387,6 +390,7 @@ void hal_call(unsigned seg, unsigned off)
 static const unsigned plane_seg[4] = { 0xA800, 0xB000, 0xB800, 0xE000 };
 
 void hal_gon(int on) { outp(0xA2, on ? 0x0D : 0x0C); }
+void hal_ton(int on) { (void)on; }
 void hal_gpage(int active, int display) { outp(0xA6, active & 1); outp(0xA4, display & 1); }
 void hal_analog(int on) { outp(0x6A, on ? 0x01 : 0x00); }
 void hal_palette(int idx, int g, int r, int b)

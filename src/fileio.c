@@ -1,5 +1,6 @@
 /* fileio.c - file statements (DOS file functions only) */
 #include "basic.h"
+#include "vessel.h"
 #include <ctype.h>
 #ifdef __WATCOMC__
 #include <dos.h>
@@ -246,9 +247,10 @@ void stmt_bload(void)
     unsigned seg = def_seg;
     FILE *fp;
     int c;
+    int run_after = 0;
     eval_str(&a);
-    if (accept(',')) { if (peekc() != ',' && !at_stmt_end() && toupper(peekc()) != 'R') off = eval_long(); if (accept(',')) { if (toupper(peekc()) == 'R') txtptr++; } }
-    else if (!at_stmt_end() && toupper(peekc()) == 'R') txtptr++;
+    if (accept(',')) { if (peekc() != ',' && !at_stmt_end() && toupper(peekc()) != 'R') off = eval_long(); if (accept(',')) { if (toupper(peekc()) == 'R') { txtptr++; run_after = 1; } } else if (toupper(peekc()) == 'R') { txtptr++; run_after = 1; } /* PC-88 style: BLOAD "file",R */ }
+    else if (!at_stmt_end() && toupper(peekc()) == 'R') { txtptr++; run_after = 1; }
     file_fname(a.u.s.p, a.u.s.len, fn, 0);
     fp = fopen(fn, "rb");
     if (!fp) berror(E_FILE_NF);
@@ -262,11 +264,49 @@ void stmt_bload(void)
         }
         for (i = 0; i < len; i++) { c = fgetc(fp); if (c == EOF) break; hal_poke(seg, (unsigned)(off + i), c); }
     } else {
-        if (off < 0) off = 0;
-        i = 0;
-        while (c != EOF) { hal_poke(seg, (unsigned)(off + i), c); i++; c = fgetc(fp); }
+        /* PC-88 BSAVE format: a 4-byte header [load addr][end addr]
+         * precedes the payload, and BLOAD places the payload at the
+         * header's load address (an explicit ,addr overrides it).
+         * Without a sane header, fall back to a raw load into the
+         * machine area above CLEAR ,m (PC-98 style). Getting this
+         * wrong shifts position-dependent code: NEOMSC's header says
+         * 0x9900, and loading it at 0x9800 broke every absolute
+         * reference inside it (found via a QUASI88 state dump). */
+        /* room for the header on top of a maximum-range payload */
+        long cap = (1L << 16) + 4, n = 0;
+        unsigned char *buf = (unsigned char *)malloc((size_t)cap);
+        if (!buf) { fclose(fp); berror(E_OUT_OF_MEM); }
+        buf[n++] = (unsigned char)c;
+        while ((c = fgetc(fp)) != EOF && n < cap) buf[n++] = (unsigned char)c;
+        if (n >= 4) {
+            unsigned lad = (unsigned)buf[0] | ((unsigned)buf[1] << 8);
+            unsigned ead = (unsigned)buf[2] | ((unsigned)buf[3] << 8);
+            if (lad && lad <= ead && (long)(ead - lad + 1) <= n - 4) {
+                if (off < 0) off = (long)lad;
+                memmove(buf, buf + 4, (size_t)(n - 4));
+                /* Load only the header's declared range, not the
+                 * rest of the file: a file taken from a disk image
+                 * is padded to whole 256-byte sectors, and the
+                 * padding used to overwrite up to 255 bytes past
+                 * the end address. The PC-88 header stores an end
+                 * ADDRESS (unlike the PC-98 0xFD format above,
+                 * which stores a length), and address ranges in
+                 * this format family are end-inclusive, so the
+                 * payload is ead - lad + 1 bytes; the check above
+                 * keeps that within what the file holds. (For
+                 * NEOMSC both conventions give identical memory:
+                 * the byte at ead is 0x00 and RAM starts zeroed.) */
+                n = (long)(ead - lad + 1);
+            }
+        }
+        if (n > (1L << 16)) n = 1L << 16;   /* raw load: 64 KiB as before */
+        if (off < 0) off = p8_mem_top ? (long)((p8_mem_top + 1) & 0xFFFF) : 0x8000L;
+        for (i = 0; i < n; i++) hal_poke(seg, (unsigned)(off + i), buf[i]);
+        free(buf);
     }
     fclose(fp);
+    vessel_notify_load((unsigned)off, i);
+    if (run_after) { vessel_init(); vessel_exec((unsigned)off); }
 }
 
 long dos_diskfree(int drive)

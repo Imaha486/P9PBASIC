@@ -14,10 +14,13 @@ static int ins_mode = 0;
 static int cursor_on_prog = 0;  /* LOCATE ,,1 */
 int ank_mode = 0;               /* /G : treat 80h-9Fh,E0h-FFh as 1-byte graphic characters */
 
-char fkey_str[10][16] = {
-    "list ", "run\r", "load \"", "save \"", "cont\r",
-    "files\r", "auto ", "renum ", "key ", "screen "
-};
+#define FKEY_DEFAULTS { \
+    "list ", "run\r", "load \"", "save \"", "cont\r", \
+    "files\r", "auto ", "renum ", "key ", "screen " \
+}
+static const char fkey_default[10][16] = FKEY_DEFAULTS;
+char fkey_str[10][16] = FKEY_DEFAULTS;
+static void input_state_reset(void);    /* escape parser + pending keys, defined below */
 
 /* key trap hooks in exec.c */
 void key_trap_signal(int n);
@@ -141,9 +144,19 @@ void scr_cls(void)
     cur_x = 0; cur_y = con_top; pend_wrap = 0;
 }
 
+/* Runs once per session. A process can host several sessions in
+ * turn (engine.c), so everything a program can change is put back
+ * to its power-on value here. ank_mode is a host option (/G, set
+ * before this call) and is kept. */
 void scr_init(void)
 {
     int y;
+    scr_w = 80; scr_h = 25;             /* before con_bot is derived */
+    text_attr = 0xE1; con_mono = 0;
+    memcpy(fkey_str, fkey_default, sizeof(fkey_str));
+    sjis_lead = 0; ins_mode = 0; cursor_on_prog = 0;
+    cur_x = 0; cur_y = 0;
+    input_state_reset();
     for (y = 0; y < 25; y++) clear_row(y);
     con_top = 0; con_bot = scr_h - 1;
     con_keydisp(1);
@@ -356,6 +369,12 @@ unsigned short scr_code(int x, int y) { return cell[y][x]; }
 static char kpend[32];
 static int kpend_n = 0, kpend_i = 0;
 static int kq[16]; static int kq_n = 0;   /* pushed back keys */
+
+static void input_state_reset(void)
+{
+    esc_state = 0; esc_len = 0;
+    kpend_n = kpend_i = 0; kq_n = 0;
+}
 
 void con_flush_keys(void)
 {

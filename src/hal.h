@@ -11,6 +11,7 @@ void hal_term(void);
 void hal_tput(int x, int y, unsigned short vcode, unsigned char attr); /* raw VRAM word */
 void hal_cursor(int x, int y, int visible, int insmode);
 void hal_width40(int on);
+void hal_gfx200(int on);        /* 1 = interpreter is in a 200-line SCREEN mode */
 void hal_trow(int y, const unsigned short *codes, const unsigned char *attrs, int n);
 
 /* ---- keyboard ---- */
@@ -36,6 +37,8 @@ int  hal_inp_direct(void);
 unsigned long hal_ticks(void);  /* ~ 1/60 sec units */
 void hal_beep(int on);
 void hal_idle(void);
+void hal_poll(void);            /* called once per statement; embedded
+                                   hosts use it to stop the engine */
 
 /* ---- ports / memory ---- */
 int  hal_inp(unsigned port);
@@ -48,6 +51,7 @@ void hal_call(unsigned seg, unsigned off);
 
 /* ---- graphics (640x400, 4 planes) ---- */
 void hal_gon(int on);
+void hal_ton(int on);
 void hal_gpage(int active, int display);
 void hal_gpset(int x, int y, int c);
 int  hal_gpoint(int x, int y);

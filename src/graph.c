@@ -66,11 +66,20 @@ void g_init(void)
     hal_analog(1);
     default_palette();
     g_mode = 3;
+    hal_gfx200(0);
     vx1 = 0; vy1 = 0; vx2 = 639; vy2 = 399;
     hal_gpage(0, 0);
+    g_apage = 0; g_dpage = 1;   /* = hal_gpage(0, 0): g_dpage is a mask, bit0 = page 0 */
     hal_gclear(0);
     hal_gon(1);
+    hal_ton(1);
     g_on = 1;
+    /* the rest of the power-on state: a process can host several
+     * sessions in turn (engine.c) */
+    g_fg = 7; g_bg = 0;
+    lastx = 0; lasty = 0;
+    win_on = 0;
+    wx1 = wy1 = wx2 = wy2 = 0;
 }
 
 /* ---- coordinates ---- */
@@ -118,16 +127,36 @@ void stmt_screen(void)
     }
     if (mode < 0 || mode > 3 || ap < 0 || ap > 1 || dp < 0 || dp > 3) berror(E_ILLEGAL_FN);
     if (mode != g_mode) {
+        int was200 = (lines_of() == 200);
         g_mode = mode;
         vx1 = 0; vy1 = 0; vx2 = 639; vy2 = lines_of() - 1;
         win_on = 0;
+        /* The mode-change clear must reach the vessel GVRAM when
+         * either the old or the new mode is a 200-line mode: leaving
+         * 200-line mode with the mirror already off would leave
+         * mirrored pixels visible under the new mode, and entering
+         * it must wipe the shared VRAM the clear covers. Enable the
+         * mirror for the clear, then set it to the new mode's state. */
+        hal_gfx200(was200 || lines_of() == 200);
         hal_gpage(0, 0);
         hal_gclear(0);
+        hal_gfx200(lines_of() == 200);
     }
     /* display page is a bit mask: bit0 = page 0, bit1 = page 1 (0 = none) */
     g_apage = ap; g_dpage = dp;
     hal_gpage(ap, (dp & 1) ? 0 : (dp & 2) ? 1 : 0);
-    if (sw >= 0) g_on = (sw == 0);
+    if (sw >= 0) {
+        /* PC-88 SCREEN display switch: 0 = graphics only,
+         * 1 = text + graphics overlaid, 2 = text only.
+         * (Verified against MA2026 on QUASI88: the attract
+         * under SCREEN 0,0 shows the CG with the *TITLE panel
+         * plotted in GVRAM and the text screen's song list
+         * hidden, while *SELECT under SCREEN 0,2 shows the
+         * list alone on black. An earlier mapping had sw=2
+         * overlaid, leaving the CG visible under the list.) */
+        g_on = (sw != 2);
+        hal_ton(sw != 0);
+    }
     hal_gon(g_on && dp != 0);
 }
 
