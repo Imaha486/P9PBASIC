@@ -26,6 +26,11 @@ Checked:
     back: (x+1)-x is 0 for a single 16777216 and 1 for a double;
     (-2.5)^2 is 6.25; a type probe that prints 0 for a single and 1 for
     a double.
+  - CONVFUNC: the FF function tokens FF83 (MID$) and FFDC (TIME$) as
+    FC88V42 MENU.ALP line 286 uses them convert to
+    TM=VAL(MID$(TIME$,8,1)) with no "unknown FF token" report, in the
+    detokenizer and both converters; the host runs that statement and
+    prints only clock-independent results.
   - Line framing: the last line of a file is a statement ending in a
     constant whose payload holds 00 bytes; files that end with zero
     padding, with the bare 00 00 end marker, or right after the last
@@ -247,6 +252,24 @@ EVAL_LINES = [
     (160, PRINT + dig(1) + PLUS + sng(S_1_0), b'PRINT 1+1.0', ' 2'),
 ]
 
+# ---- CONVFUNC: FF83 = MID$ and FFDC = TIME$ (FC88V42 MENU.ALP line 286).
+# (line number, body, expected text); FUNC_ROWS is what the host prints.
+# TIME$ itself is clock-dependent, so only its shape is printed: line 10
+# is the real statement (it must run), line 30 prints the length of the
+# same substring, line 20 the value from a literal time string.
+FF_LEN, FF_VAL, FF_MID, FF_TIME = b'\xff\x92', b'\xff\x94', b'\xff\x83', b'\xff\xdc'
+MID_TIME = FF_MID + b'(' + FF_TIME + b',' + dig(8) + b',' + dig(1) + b')'
+FUNC_LINES = [
+    (10, b'TM' + EQ + FF_VAL + b'(' + MID_TIME + b')',
+     b'TM=VAL(MID$(TIME$,8,1))'),
+    (20, PRINT + FF_VAL + b'(' + FF_MID + b'("18:52:37",' + dig(8) + b','
+     + dig(1) + b'))', b'PRINT VAL(MID$("18:52:37",8,1))'),
+    (30, PRINT + FF_LEN + b'(' + MID_TIME + b')',
+     b'PRINT LEN(MID$(TIME$,8,1))'),
+]
+FUNC_REPORT = ['labels: {}']        # no "unknown FF token" lines
+FUNC_ROWS = [' 7', ' 1']
+
 LAB_LINES = [
     # 5 STOP ON:ON STOP GOSUB *TYPE   (dropped -> REM)
     (5, b'\x90 \x95:\x95 \x90 \x8d \xf5TYPE', b'REM'),
@@ -318,8 +341,12 @@ def check_program(name, lines, cbin, outdir, want_report=None, tail=PADDED):
     chk(f'{name}: C text == python text', r.stdout, got)
     if want_report is not None:
         crep = r.stderr.decode('latin-1').splitlines()
-        # the C report ends with its own "converted: ..." summary line
-        chk(f'{name}: C report', crep[:len(want_report)], want_report)
+        # the C report ends with its own "converted: ..." summary line;
+        # drop only that line and compare the whole remaining report, so
+        # an unexpected warning anywhere in it fails the check
+        if crep and crep[-1].startswith('converted:'):
+            crep.pop()
+        chk(f'{name}: C report', crep, want_report)
     return got
 
 
@@ -400,6 +427,10 @@ def main():
         check_program('CONVNUM' + suffix, NUM_LINES, cbin, outdir, tail=tail)
         check_program('CONVEND' + suffix, END_LINES, cbin, outdir, tail=tail)
     evaltext = check_program('CONVEVAL', EVAL_LINES, cbin, outdir)
+    for no, body, text in FUNC_LINES:
+        chk(f'detok FUNC line {no}', p88_detok.detok(body),
+            text.decode('latin-1'))
+    functext = check_program('CONVFUNC', FUNC_LINES, cbin, outdir, FUNC_REPORT)
     text = check_program('CONVLAB', LAB_LINES, cbin, outdir, LAB_REPORT)
     with open(os.path.join(outdir, 'CONVLAB.BAS'), 'wb') as f:
         f.write(text)
@@ -415,6 +446,9 @@ def main():
                 chk(f'CONVEVAL line {ln[0]} ({ln[2].decode()}) prints',
                     got, ln[3])
             chk('CONVEVAL: screen rows', rows, want)
+        rows = run_host(host, outdir, 'CONVFUNC', functext)
+        if rows is not None:
+            chk('CONVFUNC: screen rows', rows, FUNC_ROWS)
         rows = run_host(host, outdir, 'CONVLAB2', lab2text)
         if rows is not None:
             chk('CONVLAB2: screen rows', rows, LAB2_ROWS)

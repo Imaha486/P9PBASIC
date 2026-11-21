@@ -36,10 +36,9 @@ import struct
 
 
 EXT = {0xDD: 'XDD', 0xDE: 'XDE', 0xDF: 'XDF'}
-# Converter's chosen interpretations for the two tentative functions.
+# Converter's chosen interpretation for the one tentative function.
 FUNC = dict(FUNC)
 FUNC[0x85] = 'INT'
-FUNC[0x82] = 'RIGHT$'
 
 
 def next_tok(body, i):

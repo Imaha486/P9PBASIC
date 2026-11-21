@@ -29,9 +29,16 @@ TOK = {
  0xCB:'COLOR',0xCE:'CLS',0xD3:'SCREEN',0xD4:'BLOAD',0xD6:'LOCATE',
  0xDC:'TO',0xDD:'THEN',
 }
+# FF xx function tokens. FF83 = MID$ and FFDC = TIME$ are confirmed by
+# FC88V42 MENU.ALP: line 286 is TM=VAL(<FF83>(<FFDC>,8,1)) and line 460
+# keeps the plain-text twin 'PM=VAL(MID$(TIME$,1,2)). With MID$ at 83 the
+# two-argument string function at 82 is RIGHT$ (LEFT$/RIGHT$/MID$ block,
+# and the use is right-justifying: RIGHT$("  "+STR$(I),3)). FF85 is still
+# a guess from context (the converters commit to INT).
 FUNC = {
  0x85:'INT?',0x90:'INP',0x92:'LEN',0x94:'VAL',0x97:'PEEK',
- 0x82:'RIGHT$?',0x93:'STR$',0x9A:'HEX$',
+ 0x82:'RIGHT$',0x83:'MID$',0x93:'STR$',0x9A:'HEX$',
+ 0xDC:'TIME$',
 }
 OPS = {0xF0:'>',0xF1:'=',0xF2:'<',0xF3:'+',0xF4:'-',0xF5:'*',0xF6:'/',0xF7:'^',
        0xF8:'AND',0xF9:'OR',0xFA:'XOR',0xFB:'EQV',0xFC:'IMP',0xFD:'MOD',0xFE:'\\'}

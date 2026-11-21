@@ -100,12 +100,15 @@ static const char *tok_name(int b)
     return 0;
 }
 
-/* FF xx function tokens.  The converter commits to INT for FF85 and
- * RIGHT$ for FF82 (the detokenizer still shows them with a '?'). */
+/* FF xx function tokens.  The converter commits to INT for FF85 (the
+ * detokenizer still shows it with a '?').  FF83 = MID$ and FFDC = TIME$
+ * are confirmed by FC88V42 MENU.ALP (line 286 against the plain-text twin
+ * in line 460); the interpreter tokenizes both names as written. */
 static const char *func_name(int t)
 {
     switch (t) {
     case 0x82: return "RIGHT$";
+    case 0x83: return "MID$";
     case 0x85: return "INT";
     case 0x90: return "INP";
     case 0x92: return "LEN";
@@ -113,6 +116,7 @@ static const char *func_name(int t)
     case 0x94: return "VAL";
     case 0x97: return "PEEK";
     case 0x9A: return "HEX$";
+    case 0xDC: return "TIME$";
     }
     return 0;
 }
