@@ -7,6 +7,7 @@
 void fn_clear(void);
 void stmt_deffn(void);
 void rnd_randomize(long n);
+void rnd_reset(void);
 void option_base_set(int b);
 void *array_base(const char *name, int type, long *bytes);
 void print_using_dummy(void);
@@ -2049,10 +2050,16 @@ int prog_save(const char *fname)
     return 1;
 }
 
+/* Runs once per session (never per RUN). A process can host several
+ * sessions in turn (engine.c), so state that a RUN does not clear
+ * is put back to its initial value here. */
 void interp_init(void)
 {
+    free(prog_mem);             /* the previous session's program area (NULL on first init) */
     prog_mem = (u8 *)malloc(PROG_MAX + 4);
     if (!prog_mem) { puts("\x83\x81\x83\x82\x83\x8A\x82\xAA\x91\xAB\x82\xE8\x82\xDC\x82\xB9\x82\xF1");  /* メモリが足りません */ exit(1); }
     prog_mem[0] = prog_mem[1] = 0;
+    p8_mem_top = 0;             /* CLEAR ,m not given yet */
+    rnd_reset();
     def_seg = hal_dataseg();
 }

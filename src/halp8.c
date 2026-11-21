@@ -71,6 +71,43 @@ static volatile int paused_flag = 0;
 void halp8_set_paused(int paused) { paused_flag = paused; }
 int  halp8_paused(void) { return paused_flag; }
 
+static int gon_flag = 1, ton_flag = 1;
+static int gfx200 = 0;
+static int pal[16][3];
+static int pal_init = 0;
+static int poll_n = 0;              /* hal_poll's statement counter */
+
+/* Put every per-session static back to its power-on value, so a new
+ * engine in the same process starts from the state a fresh process
+ * would have. Called by p8_start() before the engine thread exists
+ * (no interpreter thread is running), and BEFORE
+ * vessel_session_reset(): the vessel's setup pokes its stubs into
+ * the guest RAM cleared here. */
+void halp8_session_reset(void)
+{
+    stop_req = 0;
+    paused_flag = 0;
+    pthread_mutex_lock(&kq_mu);
+    kq_head = kq_tail = 0;
+    pthread_mutex_unlock(&kq_mu);
+    memset(memory, 0, sizeof(memory));
+    memset(tv, 0, sizeof(tv));
+    memset(ta, 0, sizeof(ta));
+    memset(gv, 0, sizeof(gv));
+    ap = dp = 0;
+    w40 = 0;
+    gfx200 = 0;
+    hcur_x = hcur_y = hcur_vis = 0;
+    memset(pal, 0, sizeof(pal));
+    pal_init = 0;                   /* re-initialises on first use */
+    gon_flag = 1; ton_flag = 1;
+    tick = 0;
+    brkflag = 0;
+    inp_direct = 0;
+    memset(kmatrix, 0xFF, sizeof(kmatrix));   /* idle = nothing pressed */
+    poll_n = 0;
+}
+
 const unsigned short *halp8_text_codes(void) { return &tv[0][0]; }
 const unsigned char  *halp8_text_attrs(void) { return &ta[0][0]; }
 const unsigned char  *halp8_gfx(int page) { return &gv[page & 1][0][0]; }
@@ -145,7 +182,6 @@ unsigned hal_dataseg(void) { return 0x1000; }
 unsigned long hal_varptr(void *p) { return (unsigned long)((size_t)p & 0xFFFF) | 0x10000000UL; }
 void hal_call(unsigned seg, unsigned off) { (void)seg; (void)off; }
 
-static int gon_flag = 1, ton_flag = 1;
 void hal_gon(int on) { gon_flag = on; }
 void hal_ton(int on) { ton_flag = on; }
 int halp8_gfx_visible(void) { return gon_flag; }
@@ -156,7 +192,6 @@ int halp8_text_visible(void) { return ton_flag; }
  * in the interpreter's 200-line modes (hal_gfx200), and colors
  * above 7 clear the vessel bits so the interpreter's own color
  * shows through the frame compositor. */
-static int gfx200 = 0;
 void hal_gfx200(int on) { gfx200 = on; }
 static int vcol(int c) { return (c >= 0 && c <= 7) ? c : 0; }
 void hal_gpage(int a, int d)
@@ -188,8 +223,6 @@ int hal_gpoint(int x, int y)
 void hal_ghline(int x1, int x2, int y, int c) { int x; for (x = x1; x <= x2; x++) hal_gpset(x, y, c); }
 void hal_gclear(int c) { memset(gv[ap], c, sizeof(gv[0])); if (ap == dp && gfx200 && c >= 0) vessel_vram_clear(vcol(c)); }
 
-static int pal[16][3];
-static int pal_init = 0;
 void hal_palette(int i, int g, int r, int b)
 {
     if (!pal_init) {
@@ -241,12 +274,11 @@ void hal_setdate(int y, int mo, int d) { (void)y; (void)mo; (void)d; }
  * overflows and playback tears. Checked every 64 statements: one check interval pumps ~0.27 s of emulated time, which the 2 s ring absorbs. */
 void hal_poll(void)
 {
-    static int n = 0;
     if (stop_req) p8_bail();
     while (paused_flag && !stop_req) usleep(10000);
     if (stop_req) p8_bail();
-    if (++n < 64) return;
-    n = 0;
+    if (++poll_n < 64) return;
+    poll_n = 0;
     /* Each statement pumps ~4 ms of emulated time, so a fast host
      * produces seconds of audio per check interval; sleep off the
      * whole lead (in stop-responsive chunks), not a fixed cap. */

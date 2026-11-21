@@ -26,7 +26,8 @@ note "build"
 EMBED_OBJS=$(ls build-embed/*.o | grep -v embed_test \
              | grep -v textmerge_test | grep -v window_test \
              | grep -v subsys_test | grep -v dramload_test | grep -v pcmb_ports_test \
-             | grep -v kanjifont_test | grep -v gfxmirror_test)
+             | grep -v kanjifont_test | grep -v gfxmirror_test \
+             | grep -v restart_test)
 unit_test() { # name [args...]
   _t=$1; shift
   cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c "tools/$_t.c" \
@@ -201,6 +202,39 @@ sed -n '/----- SCREEN -----/,/----- ATTRS (raw)/p' "$WORK/embedsel.log" \
 sed -n '/----- ATTRS (merged) -----/,$p' "$WORK/embedsel.log" \
   | grep -q 'a0a0' || bad "embedsel: no pair-driven recoloring in merged attrs"
 [ $FAIL -eq 0 ] && echo "embed text ok"
+
+# In-process restart: the app creates a fresh engine per game launch
+# in one process, so a second create/boot/start after stop/destroy
+# must behave like the first (docs/APPROXIMATIONS.md item 22). Both
+# boots sample the frame at the same point of the title sequence:
+# the hashes must be equal, boot1's reference frame must be nonblank
+# (two identical blank frames must not pass), and boot2 must be
+# alive at the end and audible (restart_test's own exit status
+# covers "running at t=3").
+note "embed: in-process restart (2 x 45 s)"
+if cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c tools/restart_test.c \
+      -o build-embed/restart_test.o 2>/dev/null \
+   && c++ -o build-embed/restart_test $EMBED_OBJS build-embed/restart_test.o \
+        -lm -lpthread 2>/dev/null; then
+  (cd /tmp && "$ROOT/build-embed/restart_test" "$DISK" 45 \
+     > "$WORK/restart.log" 2>&1) || bad "restart: boot2 dead or silent"
+  H1=$(sed -n 's/^boot1: frame_hash=\([0-9a-f]*\).*/\1/p' "$WORK/restart.log")
+  H2=$(sed -n 's/^boot2: frame_hash=\([0-9a-f]*\).*/\1/p' "$WORK/restart.log")
+  A2=$(sed -n 's/^boot2: end .*audio_frames=\([0-9]*\).*/\1/p' "$WORK/restart.log")
+  N1=$(sed -n 's/^boot1: frame_hash=.* nonzero_pixels=\([0-9]*\).*/\1/p' "$WORK/restart.log")
+  R2=$(sed -n 's/^boot2: end running=\([0-9]*\).*/\1/p' "$WORK/restart.log")
+  [ -n "$H1" ] && [ "$H1" = "$H2" ] \
+    || bad "restart: frame hash boot1=${H1:-none} boot2=${H2:-none}"
+  [ -n "$N1" ] && [ "$N1" -gt 10000 ] \
+    || bad "restart: boot1 reference frame blank (nonzero_pixels=${N1:-none})"
+  [ "$R2" = 1 ] \
+    || bad "restart: boot2 end running=${R2:-none}"
+  [ -n "$A2" ] && [ "$A2" -gt 0 ] \
+    || bad "restart: boot2 audio_frames=${A2:-none}"
+else
+  bad "restart_test build"
+fi
+[ $FAIL -eq 0 ] && echo "embed restart ok"
 
 echo
 [ $FAIL -eq 0 ] && echo "SUITE PASSED" || echo "SUITE FAILED"

@@ -69,10 +69,17 @@ void g_init(void)
     hal_gfx200(0);
     vx1 = 0; vy1 = 0; vx2 = 639; vy2 = 399;
     hal_gpage(0, 0);
+    g_apage = 0; g_dpage = 1;   /* = hal_gpage(0, 0): g_dpage is a mask, bit0 = page 0 */
     hal_gclear(0);
     hal_gon(1);
     hal_ton(1);
     g_on = 1;
+    /* the rest of the power-on state: a process can host several
+     * sessions in turn (engine.c) */
+    g_fg = 7; g_bg = 0;
+    lastx = 0; lasty = 0;
+    win_on = 0;
+    wx1 = wy1 = wx2 = wy2 = 0;
 }
 
 /* ---- coordinates ---- */

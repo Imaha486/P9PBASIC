@@ -28,6 +28,13 @@ int  halp8_stop_requested(void);
 void halp8_set_paused(int paused);
 int  halp8_paused(void);
 
+/* Reset every per-session static (stop/pause flags, key queue, guest
+ * RAM, text/graphics planes, palette, clock, key matrix) to its
+ * power-on state. Called by p8_start() before the engine thread is
+ * created, and before vessel_session_reset() (whose setup pokes
+ * stubs into the RAM cleared here). */
+void halp8_session_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

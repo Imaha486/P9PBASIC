@@ -37,6 +37,7 @@
 
 static z80 cpu;
 static int inited = 0;
+static int pump_live = 0;   /* set by the session's first vessel_init() call */
 static int vtrace = -1;
 static int pmd_loaded = 0;
 static unsigned char rom_seen[0x8000 / 8];
@@ -115,6 +116,16 @@ static int d88_open(void)
     if (d88_image_count == 0) { d88_image_base[0] = 0; d88_image_count = 1; }
     d88_state = 1;
     return 1;
+}
+
+/* Drop the open disk image, so the next read opens the current
+ * P8P_DISK afresh (this also discards the in-memory sector writes
+ * made to the old image). Called by engine.c p8_create(): a new
+ * engine binds a new disk, and p8_boot's materialization already
+ * reads sectors through d88_open(), before the session reset. */
+void vessel_forget_disk(void)
+{
+    d88_state = 0; d88_size = 0; d88_image_count = 0;
 }
 
 static long d88_base(int img)
@@ -1086,10 +1097,10 @@ static void irq_service(void)
     }
 }
 
-void vessel_init(void)
+/* The machine setup proper, shared by the lazy first-use path
+ * (vessel_init) and the per-session reset (vessel_session_reset). */
+static void vessel_setup(void)
 {
-    if (inited) return;
-    inited = 1;
     z80_init(&cpu);
     cpu.read_byte = mem_read;
     cpu.write_byte = mem_write;
@@ -1125,6 +1136,74 @@ void vessel_init(void)
     hal_poke(0, 0xEC44, 0);
     hal_poke(0, 0xEC45, 0);
     hal_poke(0, 0xEC46, 0);
+}
+
+/* Idempotent: safe to call mid-run, it never resets a guest that is
+ * already set up. The first call of a session also switches the
+ * per-statement pump on (pump_live) - emulated time, and with it
+ * audio rendering and the engine's pacing, starts at the first
+ * machine-code use, exactly as it did when this call also performed
+ * the setup. */
+void vessel_init(void)
+{
+    pump_live = 1;
+    if (inited) return;
+    inited = 1;
+    vessel_setup();
+}
+
+/* Per-session reset for hosts that boot more than one engine in a
+ * process (engine.c p8_start): every guest-visible static goes back
+ * to its power-on value and the setup runs again, so the new
+ * session cannot see the previous one's RAM-side stubs, VRAM, CPU,
+ * ports or OPNA shadow. The disk image is NOT dropped here: the
+ * engine's disk is bound at p8_create() (vessel_forget_disk), and
+ * the image p8_boot's materialization opened from it stays open for
+ * the run. Must run AFTER halp8_session_reset():
+ * vessel_setup pokes its stubs (0xE808, REST_CELL, 0xEC41..) into
+ * the guest RAM that call clears. `inited` is left set, so the lazy
+ * vessel_init() calls during the run do not set the guest up a
+ * second time. Not reset: the trace-only state (vtrace, rom_seen,
+ * pmd_seen, in_seen, out_seen, pc_ring, and the function-local
+ * trace counters), which the guest cannot observe. */
+void vessel_session_reset(void)
+{
+    pmd_loaded = 0;
+    /* disk subsystem command processor */
+    oq_head = oq_count = 0;
+    read_len = 0; read_valid = 0;
+    memset(read_buf, 0, sizeof(read_buf));
+    memset(write_buf, 0, sizeof(write_buf));
+    sub_cmd = -1; sub_need = 0; sub_npar = 0; sub_wleft = 0;
+    memset(sub_par, 0, sizeof(sub_par));
+    sub_err = 0; surface_mode = 0;
+    /* 8255 handshake */
+    cfg_a_input = 1; cfg_b_input = 0; ppi_mode = 0;
+    hostc = 0; prev_c = 0; latch = 0xFF; latched = 0; sub_dac = 0;
+    /* ports, banking, ALU (idle = main RAM, latch empty), kanji ROM */
+    memset(misc_port, 0, sizeof(misc_port));
+    kanji_addr[0] = kanji_addr[1] = 0;
+    intr_level = 7;
+    alu_buf = 0;
+    /* OPNA register shadow, Timer B, write counters */
+    opn_addr[0] = opn_addr[1] = 0;
+    memset(opn_reg, 0, sizeof(opn_reg));
+    memset(opn_nwrite, 0, sizeof(opn_nwrite));
+    memset(opn_nwrite1, 0, sizeof(opn_nwrite1));
+    tb_flag = 0;
+    /* interrupt model. in_run is cleared defensively: no path bails
+     * out (p8_bail's longjmp) from inside run_loop today, but one
+     * that did would leave it set and keep vessel_pump off for the
+     * whole next session. */
+    in_run = 0;
+    last_cyc = 0;
+    vrtc_left = VRTC_PERIOD; tb_left = 0;
+    vrtc_due = 0; tb_due = 0;
+    slot_vrtc_seen = 0; slot_opn_seen = 0;
+    /* CPU, GVRAM, bank, port defaults, palette, window, RAM stubs */
+    pump_live = 0;
+    inited = 1;
+    vessel_setup();
 }
 
 static unsigned short pc_ring[64];
@@ -1200,7 +1279,7 @@ void vessel_pump(void)
 {
     int k;
     static unsigned long pump_count = 0;
-    if (!inited || in_run) return;
+    if (!pump_live || in_run) return;
     /* At rest the machine belongs to the host mainline, which runs
      * with interrupts enabled (the ROM does); a driver call that
      * returns with DI must not mute the machine for good. */

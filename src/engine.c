@@ -101,6 +101,9 @@ P8Engine *p8_create(const char *d88_path)
     pthread_mutex_init(&e->ring_mu, 0);
     /* the vessel opens the disk lazily from the environment */
     setenv("P8P_DISK", d88_path, 1);
+    /* a new engine binds a new disk: drop the image a previous
+     * engine left open, before p8_boot reads sectors through it */
+    vessel_forget_disk();
     opna_reset();
     opna_set_sink(ring_sink, e);
     return e;
@@ -163,6 +166,12 @@ void p8_start(P8Engine *e)
     if (e->started) return;
     e->running = 1;
     e->started = 1;
+    /* A process may boot several engines in turn: put the HAL and
+     * the vessel back to power-on state. Order matters - the
+     * vessel's setup pokes its stubs into the guest RAM that
+     * halp8_session_reset() clears. */
+    halp8_session_reset();
+    vessel_session_reset();
     clock_gettime(CLOCK_MONOTONIC, &e->t0);
     pthread_create(&e->th, 0, engine_thread, e);
 }

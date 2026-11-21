@@ -110,8 +110,16 @@ static void make_str(VAL *v, const char *p, unsigned len)
 /* ---------------- RND ----------------
  * Own generator: 32-bit xorshift (shifts 13/17/5), upper 24 bits -> [0,1).
  */
-static unsigned long rnd_state = 0x2545F491UL;
+#define RND_SEED0 0x2545F491UL
+static unsigned long rnd_state = RND_SEED0;
 static float rnd_last = 0;
+
+/* back to the power-on sequence (interp_init: once per session) */
+void rnd_reset(void)
+{
+    rnd_state = RND_SEED0;
+    rnd_last = 0;
+}
 
 static float rnd_next(void)
 {

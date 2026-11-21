@@ -337,3 +337,114 @@ P8PBASIC の実装にある近似・部分実装・環境依存を全て洗い�
     に再確認する)。(3) 400ラインモードで描かれたページを
     200ラインモードで表示すると、再同期は偶数行を標本化する
     (行ペアが揃っていない画素は隣の行へ写ることがある)。
+
+22. **エンジンは1プロセス1回限りだった (プロセス内再起動)**
+    （src/halp8.c、src/vessel.c、src/engine.c）【2026-11-21 対処】
+    Fable レビュー指摘 H-3。アプリはゲーム起動のたびに同一
+    プロセス内で新しい P8Engine を作る (p8_create / p8_boot /
+    p8_start … p8_stop / p8_destroy) が、エンジンの状態の大半は
+    P8Engine ではなくプロセス大域の static にあり、2回目以降の
+    セッションへ持ち越されていた。
+    症状: アプリのリセット/再起動で始まった2回目のセッションが
+    即死する。halp8.c の stop_req は p8_stop が立てたまま誰も
+    下ろさず、新しいエンジンスレッドは最初の hal_poll で
+    p8_bail する (running=0、音声 0 フレーム)。画面には前の
+    セッションの最終フレームが残る。stop_req 以外にも、
+    vessel_init() は初回以降早期リターンするためゲスト RAM /
+    GVRAM / Z80 / パレット / OPNA シャドウが前セッションの
+    内容のまま、d88_state はディスクを開き直さず、halp8 の
+    画面・キー・時計の static も残っていた。
+    設計 (セッションリセット): p8_start() が pthread_create の
+    前に halp8_session_reset() → vessel_session_reset() の順で
+    呼ぶ (エンジンスレッドがまだ無い時点なので競合しない。
+    ymfm 側は従来どおり p8_create の opna_reset())。
+    - halp8_session_reset(): stop_req / paused_flag、キー
+      キュー (kq_mu 下で空に)、ゲスト RAM memory[65536]、
+      テキスト面 tv / ta、グラフィック面 gv、ap / dp、w40、
+      gfx200、カーソル (hcur_x / hcur_y / hcur_vis)、パレット
+      (pal、pal_init=0 で初回使用時に再初期化)、gon / ton
+      フラグ (初期値 1)、tick、brkflag、inp_direct、kmatrix
+      (全 0xFF = 無押下)、hal_poll の文カウンタ (関数内 static
+      だったものをファイルスコープの poll_n へ移した)。
+    - vessel_forget_disk() (p8_create が setenv("P8P_DISK")
+      の直後に呼ぶ): D88 (d88_state / d88_size /
+      d88_image_count)。次の読み出しで現在の P8P_DISK から
+      開き直す (前のエンジンのメモリ上セクタ書き込みも捨てる)。
+      p8_start ではなく p8_create で行う理由: p8_boot の
+      マテリアライズ (p88disk.c → vessel_d88_sector →
+      d88_open) がセッションリセットより前にセクタを読むため、
+      リセット側で捨てると、別のゲームを起動したとき前の
+      ディスクのファイルが展開されてしまう (レビュー指摘)。
+      マテリアライズで開いたイメージはその実行中そのまま使う
+      ので、vessel_session_reset() は D88 に触れない。
+    - vessel_session_reset():
+      pmd_loaded、サブシステム転送状態 (出力キュー、読み書き
+      バッファ、sub_cmd=-1 ほかコマンド状態、surface_mode)、
+      8255 ハンドシェイク (cfg_a_input / cfg_b_input /
+      ppi_mode / hostc / prev_c / latch / latched / sub_dac)、
+      misc_port、漢字 ROM アドレスラッチ、intr_level=7、ALU
+      ラッチ alu_buf、OPNA レジスタシャドウ (opn_addr /
+      opn_reg) と書き込みカウンタ、Timer B (tb_flag / tb_left
+      / tb_due)、VRTC (vrtc_left / vrtc_due)、in_run、last_cyc、
+      slot_*_seen。その後、vessel_init() の本体を切り出した
+      vessel_setup() (z80_init、gvram クリア、mem_bank、
+      misc_port 既定値、palette_reset、window_base、0xE808 /
+      REST_CELL / 0xEC41〜 のスタブ書き込み) を実行し、inited
+      を立てたままにする。実行中の遅延 vessel_init() 呼び出しは
+      従来どおり冪等で、ゲストを途中でリセットしない。
+    順序の理由: vessel_setup() のスタブは hal_poke で halp8.c の
+    ゲスト RAM に書かれる。halp8_session_reset() が RAM を
+    消すので、vessel を後に呼ばないとスタブが消える。
+    ポンプの開始点は変えていない: 従来 vessel_pump() は inited
+    で門を掛けており、エミュレート時間 (= 音声レンダリングと
+    hal_poll のペーシング) は最初の機械語使用から始まっていた。
+    リセットが inited を立てるようになったため、門は別フラグ
+    pump_live (セッション最初の vessel_init() 呼び出しで立つ) に
+    分けた。inited のままだと1文目からポンプが回り、機械語を
+    使わない BASIC プログラムまで 1文 ≒ 4 ms に律速される。
+    リセットしないもの: トレース専用の状態 (vtrace、rom_seen /
+    pmd_seen / in_seen / out_seen、pc_ring、関数内のトレース
+    カウンタ) はゲストから見えないので残す。
+    残る差 (1回目の起動): セットアップが「最初の機械語使用時」
+    から「起動時」へ前倒しになった。それ以前に BASIC が
+    INP(&H32) / INP(&H34) やスタブ番地の PEEK をすれば既定値が
+    見え、最初の機械語使用時の GVRAM / パレット / ポートの
+    再初期化は起きなくなる。ホスト CLI (halhost) は従来どおり
+    遅延初期化のまま。
+    インタプリタ側の初期化点 (engine_thread がセッションごとに
+    1回呼ぶ interp_init / scr_init / g_init。RUN ごとには
+    呼ばれないので、セッション内の挙動は変わらない) でも、
+    RUN が消さない状態を初期値へ戻す (レビュー指摘):
+    - interp_init() (exec.c): 前セッションの prog_mem を free
+      してから確保し直す (従来は再起動ごとに約 64 KiB リーク)。
+      p8_mem_top=0 (CLEAR ,m 未指定の値。BLOAD の既定ロード
+      番地が依存する)。rnd_reset() (eval.c) で RND の系列
+      rnd_state を初期シードへ、rnd_last を 0 へ戻す。
+    - scr_init() (screen.c): scr_w=80 / scr_h=25 (con_bot を
+      導く前に。前セッションの WIDTH 40 が HAL だけ 80 桁に
+      戻った状態で残っていた)、text_attr=0xE1、con_mono=0、
+      ファンクションキー定義 fkey_str (既定値の表から複写)、
+      キー展開の残り kpend_n / kpend_i、押し戻しキー kq_n、
+      エスケープシーケンス解析 esc_state / esc_len、sjis_lead、
+      ins_mode、cursor_on_prog、cur_x / cur_y。ank_mode は
+      ホスト CLI のオプション (/G) で scr_init より前に設定
+      されるため戻さない。
+    - g_init() (graph.c): g_apage=0 / g_dpage=1 (既存の
+      hal_gpage(0,0) と一致する値。g_dpage はビットマスクで
+      bit0 = ページ 0)、g_fg=7 / g_bg=0、lastx / lasty=0、
+      win_on=0、wx1 / wy1 / wx2 / wy2=0。
+    いずれも static 初期化子と同じ値なので、新規プロセスの
+    1回目の起動は変わらない。
+    未確認: 上記以外のインタプリタ側 static (exec.c の
+    auto_mode / trace_on / err_line / err_code、開いたままの
+    ファイル等) は対象外で、変数・ON ERROR・キートラップ等は
+    従来どおり RUN の初期化 (clear_runtime) に任せている。
+    同一 P8Engine を p8_stop 後に p8_start し直す場合は
+    p8_create を通らないので、ディスクイメージ (メモリ上の
+    セクタ書き込みを含む) は引き継がれる。
+    回帰ガード: tools/restart_test.c (2回起動し、2回目が t=3 と
+    終了時に実行中・音声あり・最終フレームのハッシュが1回目と
+    一致し、かつ1回目の基準フレームが非空 (nonzero_pixels >
+    10000) であることを tests/run_regress.sh の embed 段で
+    確認)。同じディスクを2回起動するだけなので、別ディスクへの
+    切り替え (vessel_forget_disk) 自体は検証していない。
