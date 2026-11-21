@@ -333,12 +333,11 @@ static double scale2(double v, int e);
  *   bits  = m0 | m1<<8 | (m2 & 0x7F)<<16 | 0x800000
  *   value = sign * bits * 2^(exp-128-24)
  *         = sign * (1 + frac/2^23) * 2^(exp-129)
- * which is exact in a double.  Zero keeps its type ("0!").  Short slice
- * -> "?". */
-static void put_mbf_single(Buf *b, const unsigned char *p, long avail)
+ * which is exact in a double.  Zero keeps its type ("0!").  The caller
+ * (convert_body) has checked that all 4 payload bytes exist. */
+static void put_mbf_single(Buf *b, const unsigned char *p)
 {
     double bits;
-    if (avail < 4) { buf_putc(b, '?'); return; }
     if (p[3] == 0) { buf_puts(b, "0!"); return; }
     bits = (double)((unsigned long)p[0] | ((unsigned long)p[1] << 8) |
                     ((unsigned long)(p[2] & 0x7F) << 16) | 0x800000UL);
@@ -352,13 +351,13 @@ static void put_mbf_single(Buf *b, const unsigned char *p, long avail)
  * Python converts the int to float first (round-half-even to 53 bits),
  * which the uint64 -> double conversion here also does.  That rounding is
  * a representation limit shared with the interpreter, whose double is a
- * binary64 (docs/TOKEN-FORMAT.md).  Zero keeps its type ("0#"). */
-static void put_mbf_double(Buf *b, const unsigned char *p, long avail)
+ * binary64 (docs/TOKEN-FORMAT.md).  Zero keeps its type ("0#").  The
+ * caller (convert_body) has checked that all 8 payload bytes exist. */
+static void put_mbf_double(Buf *b, const unsigned char *p)
 {
     unsigned long long frac;
     double v;
     int k;
-    if (avail < 8) { buf_putc(b, '?'); return; }
     if (p[7] == 0) { buf_puts(b, "0#"); return; }
     frac = (unsigned long long)(p[6] & 0x7F) << 48;
     for (k = 5; k >= 0; k--) frac |= (unsigned long long)p[k] << (8 * k);
@@ -386,59 +385,110 @@ static unsigned rd_u16(const unsigned char *p) { return p[0] | (p[1] << 8); }
 
 typedef struct { long no; long off, len; } Line;
 
-/* Line = [link u16][lineno u16][body][00].  The link field is supposed to
- * be the file offset of the next line but drifts by 1 on some lines in the
- * real files, so (as in p88_detok.parse_lines) we probe link, link-1,
- * link+1, link-2, link+2 for a header whose line number is a little larger
- * and whose own link points forward.  When no candidate fits, this is the
- * last line, framed by last_line_end().  Returns the line count, or -1 on
- * allocation failure. */
-static const int link_probe[5] = { 0, -1, 1, -2, 2 };
+/* Line = [link u16][lineno u16][body][00].
+ *
+ * A line is framed by its own bytes, not by its link field: body_end walks
+ * the body token by token and the line ends at the first 00 it meets at a
+ * token boundary.  The next header starts at that terminator + 1 and
+ * nowhere else.  The link field is not consulted (the real files have it
+ * 1 off, the last line of FC88 MENU.ALP 3 off); whatever it says, exact,
+ * one low, one high or garbage, the walk decides.
+ *
+ * token_width, body_end and parse_lines mirror the functions of the same
+ * names in tools/p88_detok.py decision for decision: both sides must
+ * frame, and reject, the same inputs. */
+#define MAX_LINENO 65529L       /* largest line number N88-BASIC accepts */
+#define NO_TERM   (-1L)         /* body_end: the buffer ends before a 00 */
+#define CUT_TOKEN (-2L)         /* body_end: the buffer ends inside a token */
 
-/* End (exclusive) of the body of the last line, whose body starts at off.
- * The line's own link field points just past its 00 terminator, at the
- * 00 00 end-of-program marker, so the body ends at link-1; number
- * payloads may contain 00 bytes, so the body is never scanned for one.
- * The link drifts like any other, hence the probes: first a terminator
- * followed by the end marker, then (file cut short after the terminator)
- * a terminator alone.  Only when the link leads nowhere does the first 00
- * decide. */
-static long last_line_end(const unsigned char *d, long n, long off, long link)
+/* Bytes the token starting with b occupies: the byte itself plus its
+ * payload.  0B/0C/0E/1C carry 2 payload bytes, 0F 1, 1D 4 (MBF single),
+ * 1F 8 (MBF double), FF its function / extension code; everything else
+ * (keywords, operators, digits, plain text, bytes the tables do not know)
+ * is one byte.  convert_body steps by the same widths. */
+static long token_width(int b)
 {
-    const unsigned char *z;
-    int k;
-    for (k = 0; k < 5; k++) {
-        long cand = link + link_probe[k];
-        if (cand < off + 1 || cand + 2 > n) continue;
-        if (d[cand - 1] == 0 && d[cand] == 0 && d[cand + 1] == 0)
-            return cand - 1;
-    }
-    for (k = 0; k < 5; k++) {
-        long cand = link + link_probe[k];
-        if (cand < off + 1 || cand > n) continue;
-        if (d[cand - 1] == 0) return cand - 1;
-    }
-    z = (const unsigned char *)memchr(d + off, 0, (size_t)(n - off));
-    return z ? (long)(z - d) : n;
+    if (b == 0x0B || b == 0x0C || b == 0x0E || b == 0x1C) return 3;
+    if (b == 0x0F) return 2;
+    if (b == 0x1D) return 5;
+    if (b == 0x1F) return 9;
+    if (b == 0xFF) return 2;
+    return 1;
 }
 
+/* Offset of the 00 that terminates the line whose body starts at off: the
+ * first 00 at a token boundary.  The body is walked the way convert_body
+ * reads it, so a 00 inside a token (a number payload, the second byte of
+ * FF xx) is content and is stepped over with its token.  Strings, 8F E9
+ * comments and DATA contents are raw text and end at the first 00.
+ * Returns NO_TERM when the buffer ends before a terminator and CUT_TOKEN
+ * when it ends inside a token's payload. */
+static long body_end(const unsigned char *d, long n, long off)
+{
+    long i = off, w;
+    int data = 0, quote = 0;
+
+    while (i < n) {
+        int b = d[i];
+        if (b == 0) return i;
+        if (data) {                     /* DATA: raw until an unquoted ':' */
+            if (b == 0x22) quote = !quote;
+            else if (b == 0x3A && !quote) data = 0;
+            i++;
+            continue;
+        }
+        if (b == 0x22) {                /* string literal */
+            i++;
+            while (i < n && d[i] != 0x22 && d[i] != 0) i++;
+            if (i < n && d[i] == 0x22) i++;
+            continue;
+        }
+        if (b == 0x8F && i + 1 < n && d[i + 1] == 0xE9) {
+            /* comment: raw to the 00 */
+            const unsigned char *z = (const unsigned char *)
+                memchr(d + i + 2, 0, (size_t)(n - (i + 2)));
+            return z ? (long)(z - d) : NO_TERM;
+        }
+        if (b == 0xFF && i + 1 < n && d[i + 1] == 0) {
+            i++;                        /* FF 00 is no token: 00 terminates */
+            continue;
+        }
+        w = token_width(b);
+        if (i + w > n) return CUT_TOKEN;
+        if (b == 0x84) data = 1;
+        i += w;
+    }
+    return NO_TERM;
+}
+
+/* Returns the line count, -1 on allocation failure, or -2 when d is not a
+ * tokenized program (where p88_detok.parse_lines raises ValueError).
+ * Every line, the last one included, is framed the same way: its body
+ * runs from the header to the terminator body_end finds, and what follows
+ * the terminator must be either the end of the program (the 00 00 marker,
+ * or the file ending there) or the next header, whose line number must be
+ * larger than this one's and within 1..MAX_LINENO.  Rejected: a truncated
+ * header, a line number out of range or not increasing, a line with no
+ * terminator or with a token cut off by the end of the file. */
 static long parse_lines(const unsigned char *d, long n, Line **out)
 {
-    static const int *const delta = link_probe;
     Line *v = 0;
-    long cnt = 0, cap = 0, p = 0;
+    long cnt = 0, cap = 0, p = 0, prev = 0, k;
 
-    while (p + 4 <= n) {
-        long link = (long)rd_u16(d + p), no = (long)rd_u16(d + p + 2);
-        long nxt = -1, k, off, blen;
-        if (link == 0 || no == 0) break;
-        for (k = 0; k < 5; k++) {
-            long cand = link + delta[k], l2, n2;
-            if (cand <= p + 4 || cand + 4 > n) continue;
-            l2 = (long)rd_u16(d + cand);
-            n2 = (long)rd_u16(d + cand + 2);
-            if (no < n2 && n2 < no + 2000 && l2 > cand) { nxt = cand; break; }
-        }
+    *out = 0;
+    if (n < 4) {
+        /* a few stray zero bytes are an empty program */
+        for (k = 0; k < n; k++)
+            if (d[k] != 0) return -2;
+        return 0;
+    }
+    if (d[0] == 0 && d[1] == 0) return 0;   /* end marker: empty program */
+    for (;;) {                              /* a whole header is at p */
+        long no = (long)rd_u16(d + p + 2), term, q;
+        if (no == 0 || no > MAX_LINENO) { free(v); return -2; }
+        if (no <= prev) { free(v); return -2; }
+        term = body_end(d, n, p + 4);
+        if (term < 0) { free(v); return -2; }   /* CUT_TOKEN or NO_TERM */
         if (cnt == cap) {
             Line *nv;
             cap = cap ? cap * 2 : 64;
@@ -446,18 +496,14 @@ static long parse_lines(const unsigned char *d, long n, Line **out)
             if (!nv) { free(v); return -1; }
             v = nv;
         }
-        off = p + 4;
-        if (nxt < 0) {
-            long end = last_line_end(d, n, off, link);
-            v[cnt].no = no; v[cnt].off = off; v[cnt].len = end - off;
-            cnt++;
-            break;
-        }
-        blen = nxt - off;
-        if (blen > 0 && d[off + blen - 1] == 0) blen--;
-        v[cnt].no = no; v[cnt].off = off; v[cnt].len = blen;
+        v[cnt].no = no; v[cnt].off = p + 4; v[cnt].len = term - (p + 4);
         cnt++;
-        p = nxt;
+        q = term + 1;
+        /* 00 00 marker, or the file ends (d[q:q+2] has no nonzero byte) */
+        if ((q >= n || d[q] == 0) && (q + 1 >= n || d[q + 1] == 0)) break;
+        if (q + 4 > n) { free(v); return -2; }  /* truncated header */
+        prev = no;
+        p = q;
     }
     *out = v;
     return cnt;
@@ -580,8 +626,8 @@ static long next_tok(const unsigned char *body, long n, long i)
 }
 
 /* Convert one line body and append "<text>" to out.  Returns 0 on success,
- * -1 where the Python tool would raise (struct.unpack_from or indexing
- * past the end of the body on a truncated number token). */
+ * -1 where the Python tool raises ValueError (a number token whose
+ * payload is cut off by the end of the body; p88_detok.need). */
 static int convert_body(const unsigned char *body, long n, Label *lab,
                         long nlab, long no, Buf *out, Buf *rep)
 {
@@ -748,11 +794,13 @@ static int convert_body(const unsigned char *body, long n, Label *lab,
         } else if (b >= 0x11 && b <= 0x1A) {   /* digits 0-9 */
             buf_putc(&t, '0' + (b - 0x11));
             i++;
-        } else if (b == 0x1D) {
-            put_mbf_single(&t, body + i + 1, n - (i + 1));
+        } else if (b == 0x1D) {         /* MBF single, 4 payload bytes */
+            if (i + 5 > n) { free(t.p); return -1; }
+            put_mbf_single(&t, body + i + 1);
             i += 5;
-        } else if (b == 0x1F) {
-            put_mbf_double(&t, body + i + 1, n - (i + 1));
+        } else if (b == 0x1F) {         /* MBF double, 8 payload bytes */
+            if (i + 9 > n) { free(t.p); return -1; }
+            put_mbf_double(&t, body + i + 1);
             i += 9;
         } else if (b == 0x3A) {
             buf_putc(&t, ':');

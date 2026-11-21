@@ -26,12 +26,14 @@ Adaptations (the interpreter lacks these PC-88 features):
 
 Usage: p88_to_bas.py <tokenized-file> <out.BAS>
 The tokenized file is one file extracted by p88_extract.py.
-Conversion notes/warnings go to stderr.
+Conversion notes/warnings go to stderr. An input that is not a well-formed
+tokenized program (p88_detok.parse_lines validates the line chain) is
+rejected with one error line on stderr and exit status 1.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p88_detok import (parse_lines, TOK, OPS, FUNC, mbf_single, mbf_double,
-                       int_literal)
+                       int_literal, need)
 import struct
 
 
@@ -230,6 +232,16 @@ def convert_body(body, labels, report):
             expect_label = 0; stmt_start = False
             i += 1
             continue
+        # Number tokens. A payload cut off by the end of the body is a
+        # framing error, not a program (p88conv.c returns -1 here).
+        if b in (0x0B, 0x0C, 0x0E, 0x1C):
+            need(body, i, 2)
+        elif b == 0x0F:
+            need(body, i, 1)
+        elif b == 0x1D:
+            need(body, i, 4)
+        elif b == 0x1F:
+            need(body, i, 8)
         if b == 0x0B:
             out.append('&O' + format(struct.unpack_from('<H', body, i + 1)[0], 'o')); i += 3
         elif b == 0x0C:
@@ -266,7 +278,10 @@ def convert_body(body, labels, report):
 
 def convert(data, log=None):
     """Tokenized program bytes -> .BAS file bytes (what p88_convert()
-    in src/p88conv.c returns). Report lines go to log(str) when given."""
+    in src/p88conv.c returns). Report lines go to log(str) when given.
+    Raises ValueError when data is not a well-formed tokenized program
+    (broken line chain, truncated token); p88_convert() returns NULL for
+    the same inputs."""
     lines = parse_lines(data)
     labels = collect_labels(lines)
     if log:
@@ -274,7 +289,10 @@ def convert(data, log=None):
     out_lines = []
     for no, body in lines:
         report = []
-        text = convert_body(body, labels, report)
+        try:
+            text = convert_body(body, labels, report)
+        except ValueError as e:
+            raise ValueError(f'line {no}: {e}') from None
         if log:
             for r in report:
                 log(f'line {no}: {r}')
@@ -286,8 +304,17 @@ def main():
     if len(sys.argv) != 3:
         print(__doc__)
         return 1
-    data = open(sys.argv[1], 'rb').read()
-    blob, nlines = convert(data, lambda s: print(s, file=sys.stderr))
+    # The report is held back until the conversion has succeeded, so a
+    # rejected input produces exactly one line on stderr and no output file.
+    notes = []
+    try:
+        data = open(sys.argv[1], 'rb').read()
+        blob, nlines = convert(data, notes.append)
+    except (OSError, ValueError) as e:
+        print(f'p88_to_bas.py: {sys.argv[1]}: {e}', file=sys.stderr)
+        return 1
+    for s in notes:
+        print(s, file=sys.stderr)
     open(sys.argv[2], 'wb').write(blob)
     print(f'wrote {sys.argv[2]}: {nlines} lines, {len(blob)} bytes',
           file=sys.stderr)

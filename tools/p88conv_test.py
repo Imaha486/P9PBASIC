@@ -35,6 +35,24 @@ Checked:
     constant whose payload holds 00 bytes; files that end with zero
     padding, with the bare 00 00 end marker, or right after the last
     terminator all convert to the same text.
+  - CONVTAIL: a last line shaped like ALPHA-MINI MENU.ALP line 60 (short
+    statement, terminator, 00 00, zero padding to 256 bytes, link
+    pointing past the terminator into the padding) ends at its
+    terminator: no trailing NUL content, C and Python byte-equal.
+  - CONVGAP / CONVLOW / CONVZERO / CONVGOTO / CONVLINK: lines are framed
+    by walking their tokens, never by the link field. A 10 -> 2010 ->
+    65529 line-number gap, `1 END` / `2 END`, bodies with 41 00 42
+    inside a number payload (the 00 is content) and a final `GOTO 10`
+    (payload ends in 00) frame and convert the same with exact links,
+    links one low, one high (all lines, only the first, only the last)
+    and garbage links, under all three file endings.
+  - CONVBAD: malformed inputs (a file cut inside a line, a last line
+    with no terminator before the end of the file, a line ending inside
+    an &H payload, truncated 1D / 1F float tokens, an impossible line
+    number, line numbers that do not increase, junk after the last
+    terminator) make p88_to_bas.convert raise ValueError, its command
+    line print one error line and exit 1, and the C converter exit
+    non-zero. A truncated float never becomes a `?`.
   - CONVLAB: a program using labels keeps them (`GOSUB *TYPE`,
     `THEN *OK`, the `*TYPE` / `*OK` definitions), an undefined label is
     passed through and reported, and STOP ON / ON STOP GOSUB are dropped
@@ -79,15 +97,25 @@ MARKER = b'\x00\x00'        # end marker only (exact-length file)
 CUT = b''                   # file cut right after the terminator
 
 
-def program(lines, tail=PADDED):
+def program(lines, tail=PADDED, drift=0, last_drift=None, size=None):
     """Frame (lineno, body) pairs as a tokenized file:
     [link u16][lineno u16][body][00] per line, link = file offset of the
-    next line (for the last line: of the 00 00 end marker), then tail."""
+    next line (for the last line: of the 00 00 end marker), then tail.
+    drift is added to every link and last_drift (default: drift) to the
+    last line's, as the real files have them; size zero-pads the file to
+    that many bytes."""
+    if last_drift is None:
+        last_drift = drift
     out = bytearray()
-    for no, body in lines:
+    for k, (no, body) in enumerate(lines):
         nxt = len(out) + 4 + len(body) + 1
-        out += bytes([nxt & 0xFF, nxt >> 8, no & 0xFF, no >> 8]) + body + b'\x00'
-    return bytes(out) + tail
+        link = nxt + (last_drift if k == len(lines) - 1 else drift)
+        out += bytes([link & 0xFF, link >> 8, no & 0xFF, no >> 8]) + body + b'\x00'
+    out += tail
+    if size is not None:
+        assert len(out) <= size
+        out += bytes(size - len(out))
+    return bytes(out)
 
 
 # ---- MBF payloads (mantissa little-endian, sign in the top mantissa bit,
@@ -198,6 +226,128 @@ END_LINES = [
     (10, b'A' + EQ + dig(1), b'A=1'),
     (20, b'\x89\x0e\x0a\x00', b'GOTO 10'),
 ]
+
+# ---- CONVTAIL: the tail of the ALPHA-MINI MENU.ALP (FC88 disk). Its last
+# line 60 is FF DF 20 50 + terminator, then the 00 00 end marker and zero
+# padding to 256 bytes, and its link points 3 past the terminator, into
+# the padding (the other links are 1 high). The last line's text must end
+# at the terminator: no NUL / <00> after the P.
+TAIL_LINES = [
+    (41, b'\xd4"th101.m",\x0c\x00\x4c', b'BLOAD "th101.m",&H4C00'),
+    (50, b'\xd4"mcg",R:\xff\xdf R,\x0c\x00\x4c', b'BLOAD "mcg",R:XDF  R,&H4C00'),
+    (60, b'\xff\xdf P', b'XDF  P'),
+]
+TAIL_REPORT = ['labels: {}']
+# (name suffix, drift of the links, drift of the last line's link)
+TAIL_SHAPES = [
+    ('', 1, 2),         # MENU.ALP itself
+    ('_X', 0, 2),       # exact links, only the last one overshoots
+    ('_1', 0, 1),       # overshoot by one: used to leave a single NUL
+    ('_E', 0, 0),       # exact
+]
+
+# ---- CONVBAD: inputs that are not a well-formed tokenized program. The
+# Python converter raises ValueError (never struct.error / IndexError),
+# its command line prints one error line and exits 1, and the C converter
+# exits non-zero, all without writing any program text.
+CHAIN_LINES = [
+    (10, b'A' + EQ + dig(1), b'A=1'),
+    (20, PRINT + b'A', b'PRINT A'),
+    (30, b'\x81', b'END'),
+]
+BAD_LINES = [(ln[0], ln[1]) for ln in CHAIN_LINES]
+
+
+def link_patched():
+    """CHAIN_LINES with line 20's link (offset 8) sent far outside the
+    file. The link does not frame anything, so this is still the same
+    well-formed program (it used to be rejected as CONVBAD_L)."""
+    data = bytearray(program(BAD_LINES))
+    assert data[8:12] == bytes([15, 0, 20, 0])
+    data[9] = 0x01
+    return bytes(data)
+
+
+def bad_inputs():
+    """(name, bytes) of the malformed files."""
+    good = program(BAD_LINES)
+    # the file cut in the middle of line 20: no terminator
+    cut = good[:12]
+    # the last line has body bytes but the file ends before its terminator
+    noterm = program(BAD_LINES, CUT)[:-1]
+    noterm1 = program([(10, PRINT + b'A')], CUT)[:-1]
+    # a line that ends inside the payload of an &H constant
+    short = program([(10, b'A' + EQ + b'\x0c\x34'), (20, b'\x81')])
+    # truncated float tokens. The walk reads the bytes after a short
+    # payload as the rest of it, so none of these may come out as a
+    # program: (F1) the single swallows the terminator and half of the
+    # next header and what follows is no header; (F1E) / (F2) the last
+    # line's payload runs into / past the end marker and the end of the
+    # file; (F2N) the double swallows the whole next line and the file
+    # ends there.
+    f1 = program([(10, b'\x1d\x01'), (20, b'\x81')])
+    f1e = program([(10, b'A' + EQ + b'\x1d\x01')], MARKER)
+    f2 = program([(10, b'B#' + EQ + b'\x1f\x01\x02')], MARKER)
+    f2n = program([(10, b'\x1f\x01'), (20, b'\x81')], CUT)
+    # a first header whose line number is beyond the BASIC's range
+    lineno = bytearray(good)
+    lineno[2:4] = b'\xff\xff'
+    # line numbers that go down, or repeat
+    down = program([(20, b'\x81'), (10, b'\x81')])
+    same = program([(10, b'\x81'), (10, b'\x81')])
+    # a nonzero byte after the last terminator that is no header
+    junk = program(BAD_LINES, b'\x07')
+    return [('CONVBAD_C', cut), ('CONVBAD_T', noterm),
+            ('CONVBAD_T1', noterm1), ('CONVBAD_S', short),
+            ('CONVBAD_F1', f1), ('CONVBAD_F1E', f1e), ('CONVBAD_F2', f2),
+            ('CONVBAD_F2N', f2n), ('CONVBAD_N', bytes(lineno)),
+            ('CONVBAD_O', down), ('CONVBAD_O2', same), ('CONVBAD_J', junk)]
+
+
+# ---- Token-aware framing (review round 2). (line number, body, text)
+# Finding 1: any larger line number is a next line, however far ahead.
+GAP_LINES = [
+    (10, b'\x81', b'END'),
+    (2010, b'\x81', b'END'),
+    (65529, b'\x81', b'END'),
+]
+# Finding 2a: with the links one low a shifted probe used to pick offset 5
+# instead of the real header at 6.
+LOW_LINES = [
+    (1, b'\x81', b'END'),
+    (2, b'\x81', b'END'),
+]
+# Finding 2b: 41 00 42 inside a token. Line 10: the payload of a single
+# (41 00 42 81 = 12714049 / 2^23). Line 20: an int16 65 (payload 41 00)
+# directly followed by the name B. The 00 belongs to its token in both.
+ZERO_LINES = [
+    (10, b'A' + EQ + sng(b'\x41\x00\x42\x81'), b'A=1.5156327486038208!'),
+    (20, PRINT + b'\x1c\x41\x00' + b'B', b'PRINT 65B'),
+    (30, b'\x81', b'END'),
+]
+# Finding 3 uses END_LINES: the final line is GOTO 10 = 89 0E 0A 00.
+# (name suffix, drift of the links, drift of the last line's link)
+LINK_SHAPES = [
+    ('_E', 0, 0),       # exact
+    ('_L', -1, -1),     # every link one low
+    ('_L1', -1, 0),     # all but the last one low
+    ('_LL', 0, -1),     # only the last one low
+    ('_H', 1, 1),       # every link one high
+    ('_LH', 0, 1),      # only the last one high
+]
+# links that have nothing to do with the file (stored in every header)
+GARBAGE_LINKS = [('_G', 0xFFFF), ('_GB', 0x0001)]
+TAILS = [('P', PADDED), ('M', MARKER), ('C', CUT)]
+
+
+def set_links(data, lines, value):
+    """data = program(lines, ...) with every link field set to value."""
+    out = bytearray(data)
+    p = 0
+    for _, body in lines:
+        out[p:p + 2] = struct.pack('<H', value)
+        p += 4 + len(body) + 1
+    return bytes(out)
 
 
 # ---- CONVEVAL: constants evaluated by the host interpreter.
@@ -321,10 +471,18 @@ def expected_text(lines):
     return b''.join(b'%d %s\r\n' % (ln[0], ln[2]) for ln in lines)
 
 
-def check_program(name, lines, cbin, outdir, want_report=None, tail=PADDED):
+def check_program(name, lines, cbin, outdir, want_report=None, tail=PADDED,
+                  **frame):
     """Convert with Python and C, compare both with the expected text
-    (and report). Returns the Python converter's output."""
-    data = program([(ln[0], ln[1]) for ln in lines], tail)
+    (and report). frame goes to program(). Returns the Python converter's
+    output."""
+    data = program([(ln[0], ln[1]) for ln in lines], tail, **frame)
+    return check_data(name, data, lines, cbin, outdir, want_report)
+
+
+def check_data(name, data, lines, cbin, outdir, want_report=None):
+    """check_program for file bytes built by the caller: data must
+    convert to the text of lines in Python and C alike."""
     want = expected_text(lines)
     log = []
     got, _ = p88_to_bas.convert(data, log.append)
@@ -348,6 +506,84 @@ def check_program(name, lines, cbin, outdir, want_report=None, tail=PADDED):
             crep.pop()
         chk(f'{name}: C report', crep, want_report)
     return got
+
+
+def check_tail(suffix, drift, last_drift, cbin, outdir):
+    """One CONVTAIL shape: the last line stops at its terminator in the
+    detokenizer's framing and in both converters, byte-equal."""
+    name = 'CONVTAIL' + suffix
+    frame = dict(drift=drift, last_drift=last_drift, size=256)
+    data = program([(ln[0], ln[1]) for ln in TAIL_LINES], **frame)
+    chk(f'{name}: framing', p88_detok.parse_lines(data),
+        [(ln[0], ln[1]) for ln in TAIL_LINES])
+    got = check_program(name, TAIL_LINES, cbin, outdir, TAIL_REPORT, **frame)
+    chk(f'{name}: python text has no NUL', b'\x00' in got, False)
+    chk(f'{name}: python last line', got.split(b'\r\n')[-2], b'60 XDF  P')
+    r = subprocess.run([cbin, os.path.join(outdir, name + '.tok')],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    chk(f'{name}: C text has no NUL', b'\x00' in r.stdout, False)
+    chk(f'{name}: C last line', r.stdout.split(b'\r\n')[-2:],
+        [b'60 XDF  P', b''])
+
+
+def check_frame(name, lines, cbin, outdir):
+    """The program frames into exactly its lines and converts to its
+    text whatever its link fields say (LINK_SHAPES, GARBAGE_LINKS) and
+    however the file ends (TAILS)."""
+    pairs = [(ln[0], ln[1]) for ln in lines]
+    for tsuf, tail in TAILS:
+        shapes = [(suffix, program(pairs, tail, drift=drift,
+                                   last_drift=last_drift))
+                  for suffix, drift, last_drift in LINK_SHAPES]
+        shapes += [(suffix, set_links(program(pairs, tail), pairs, value))
+                   for suffix, value in GARBAGE_LINKS]
+        for suffix, data in shapes:
+            full = name + suffix + tsuf
+            try:
+                framed = p88_detok.parse_lines(data)
+            except ValueError as e:
+                framed = f'ValueError: {e}'
+            chk(f'{full}: framing', framed, pairs)
+            try:
+                check_data(full, data, lines, cbin, outdir, ['labels: {}'])
+            except ValueError as e:
+                chk(f'{full}: python convert', f'ValueError: {e}', 'text')
+
+
+def check_malformed(name, data, cbin, outdir):
+    """A malformed input is rejected cleanly by all three entry points."""
+    try:
+        p88_to_bas.convert(data)
+        got = 'converted'
+    except ValueError as e:
+        got = 'ValueError'
+        chk(f'{name}: python message is one line',
+            bool(str(e)) and '\n' not in str(e), True)
+    except Exception as e:      # struct.error, IndexError, ...
+        got = type(e).__name__
+    chk(f'{name}: python convert raises', got, 'ValueError')
+
+    tokfile = os.path.join(outdir, name + '.tok')
+    basfile = os.path.join(outdir, name + '.BAS')
+    with open(tokfile, 'wb') as f:
+        f.write(data)
+    if os.path.exists(basfile):
+        os.remove(basfile)
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'p88_to_bas.py')
+    r = subprocess.run([sys.executable, tool, tokfile, basfile],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    err = r.stderr.decode('latin-1')
+    chk(f'{name}: python CLI exit status', r.returncode, 1)
+    chk(f'{name}: python CLI stderr is one line',
+        len(err.splitlines()), 1)
+    chk(f'{name}: python CLI has no traceback', 'Traceback' in err, False)
+    chk(f'{name}: python CLI wrote no file', os.path.exists(basfile), False)
+
+    r = subprocess.run([cbin, tokfile], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE)
+    chk(f'{name}: C rejects (exit status non-zero)', r.returncode != 0, True)
+    chk(f'{name}: C wrote no text', r.stdout, b'')
 
 
 def run_host(host, outdir, name, text):
@@ -426,6 +662,36 @@ def main():
     for suffix, tail in (('', PADDED), ('_M', MARKER), ('_C', CUT)):
         check_program('CONVNUM' + suffix, NUM_LINES, cbin, outdir, tail=tail)
         check_program('CONVEND' + suffix, END_LINES, cbin, outdir, tail=tail)
+    # a last line whose link overshoots its terminator (ALPHA MENU.ALP)
+    for suffix, drift, last_drift in TAIL_SHAPES:
+        check_tail(suffix, drift, last_drift, cbin, outdir)
+    # token-aware framing: the link field frames nothing
+    check_frame('CONVGAP', GAP_LINES, cbin, outdir)
+    check_frame('CONVLOW', LOW_LINES, cbin, outdir)
+    check_frame('CONVZERO', ZERO_LINES, cbin, outdir)
+    check_frame('CONVGOTO', END_LINES, cbin, outdir)
+    check_data('CONVLINK', link_patched(), CHAIN_LINES, cbin, outdir,
+               ['labels: {}'])
+    for no, body, text in ZERO_LINES:
+        # detok is a display tool: it appends a separator space after a
+        # trailing keyword (pre-existing format, e.g. detok(b'\x81') is
+        # 'END '); convert_body's text is the byte-exact one.
+        want = text.decode('latin-1') + (' ' if body == b'\x81' else '')
+        chk(f'detok ZERO line {no}', p88_detok.detok(body), want)
+    # a float token with a short payload is an error, never a '?'
+    for body in (b'\x1d', b'\x1d\x01', b'\x1d\x01\x02\x03',
+                 b'\x1f', b'\x1f\x01', b'\x1f\x01\x02\x03\x04\x05\x06\x07'):
+        for what, fn in (('detok', p88_detok.detok),
+                         ('convert_body',
+                          lambda b: p88_to_bas.convert_body(b, {}, []))):
+            try:
+                got = fn(body)
+            except ValueError:
+                got = 'ValueError'
+            chk(f'{what} of truncated {body.hex()}', got, 'ValueError')
+    # malformed inputs are rejected, not converted and not a traceback
+    for name, data in bad_inputs():
+        check_malformed(name, data, cbin, outdir)
     evaltext = check_program('CONVEVAL', EVAL_LINES, cbin, outdir)
     for no, body, text in FUNC_LINES:
         chk(f'detok FUNC line {no}', p88_detok.detok(body),

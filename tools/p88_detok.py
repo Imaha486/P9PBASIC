@@ -4,9 +4,12 @@ from MA2026A.D88) into readable text. Work-in-progress RE tool, 2026-11-17.
 
 Format (reverse-engineered from the actual files):
   line = [link u16 LE = file offset of next line][lineno u16 LE][body][0x00]
-  The link sometimes drifts by 1 from the true next offset, so the parser
-  searches link-2..link+2 for a plausible next header. The last line is
-  framed by its own link too (it points at the 00 00 end marker).
+  Lines are framed by walking the body token by token (body_end): the
+  line ends at the first 00 met at a token boundary, and the next header
+  (or the 00 00 end marker / end of file) starts right after it. The
+  stored link drifts by 1 in the real files and is not used to frame
+  anything; only a zero link (the end marker) is read. A chain that does
+  not hold together is rejected with ValueError.
   body = MS-BASIC-style tokens (GW-BASIC order, PC-88 extensions in C0-FE),
          plain-ASCII variable names, string literals raw (Shift_JIS).
   numbers: 0B=&O+u16 0C=&H+u16 0E=line-ref u16 0F=int8 11-1A=digits 0-9
@@ -102,8 +105,9 @@ def int_literal(v):
 
 def mbf_single(b):
     """[m0][m1][m2: sign|m2][exp], 24-bit mantissa, hidden bit at bit 23:
-    value = sign * bits * 2^(exp-128-24) = sign * (1 + frac/2^23) * 2^(exp-129)."""
-    if len(b) < 4: return '?'
+    value = sign * bits * 2^(exp-128-24) = sign * (1 + frac/2^23) * 2^(exp-129).
+    A payload shorter than 4 bytes is a truncated token: ValueError."""
+    if len(b) < 4: raise ValueError('truncated MBF single payload')
     exp = b[3]
     if exp == 0: return '0!'
     sign = -1.0 if (b[2] & 0x80) else 1.0
@@ -114,8 +118,9 @@ def mbf_double(b):
     """[m0..m5][m6: sign|m6][exp], 56-bit mantissa, hidden bit at bit 55:
     value = sign * bits * 2^(exp-128-56). The 56-bit mantissa is rounded
     (half to even) to the 53 bits of a binary64, the interpreter's own
-    double type; see docs/TOKEN-FORMAT.md."""
-    if len(b) < 8: return '?'
+    double type; see docs/TOKEN-FORMAT.md. A payload shorter than 8 bytes
+    is a truncated token: ValueError."""
+    if len(b) < 8: raise ValueError('truncated MBF double payload')
     exp = b[7]
     if exp == 0: return '0#'
     sign = -1.0 if (b[6] & 0x80) else 1.0
@@ -124,53 +129,122 @@ def mbf_double(b):
     bits = frac | (1 << 55)
     return num_literal(sign * bits * (2.0 ** (exp - 128 - 56)), True)
 
-LINK_PROBES = (0, -1, 1, -2, 2)
+MAX_LINENO = 65529              # largest line number N88-BASIC accepts
 
-def last_line_end(d, off, link):
-    """End (exclusive) of the body of the last line, whose body starts at
-    off. The line's own link field points just past its 00 terminator, at
-    the 00 00 end-of-program marker, so the body ends at link-1; number
-    payloads may contain 00 bytes, so the body is never scanned for one.
-    The link drifts like any other (see parse_lines), hence the probes:
-    first a terminator followed by the end marker, then (file cut short
-    after the terminator) a terminator alone. Only when the link leads
-    nowhere does the first 00 decide."""
-    for delta in LINK_PROBES:
-        cand = link + delta
-        if cand < off + 1 or cand + 2 > len(d): continue
-        if d[cand-1] == 0 and d[cand] == 0 and d[cand+1] == 0:
-            return cand - 1
-    for delta in LINK_PROBES:
-        cand = link + delta
-        if cand < off + 1 or cand > len(d): continue
-        if d[cand-1] == 0:
-            return cand - 1
-    end = d.find(b'\x00', off)
-    return end if end >= 0 else len(d)
+# Line framing. src/p88conv.c (token_width / body_end / parse_lines)
+# mirrors these three functions decision for decision: both sides must
+# frame, and reject, the same inputs.
+#
+# A line is framed by its own bytes, not by its link field: body_end walks
+# the body token by token and the line ends at the first 00 it meets at a
+# token boundary. The next header starts at that terminator + 1 and
+# nowhere else. The link field is not consulted (the real files have it
+# 1 off, the last line of FC88 MENU.ALP 3 off); whatever it says, exact,
+# one low, one high or garbage, the walk decides.
+
+NO_TERM = -1                    # body_end: the buffer ends before a 00
+CUT_TOKEN = -2                  # body_end: the buffer ends inside a token
+
+def token_width(b):
+    """Bytes the token starting with b occupies: the byte itself plus its
+    payload. 0B/0C/0E/1C carry 2 payload bytes, 0F 1, 1D 4 (MBF single),
+    1F 8 (MBF double), FF its function / extension code; everything else
+    (keywords, operators, digits, plain text, bytes the tables do not
+    know) is one byte. detok and p88_to_bas.convert_body step by the same
+    widths."""
+    if b in (0x0B, 0x0C, 0x0E, 0x1C): return 3
+    if b == 0x0F: return 2
+    if b == 0x1D: return 5
+    if b == 0x1F: return 9
+    if b == 0xFF: return 2
+    return 1
+
+def body_end(d, off):
+    """Offset of the 00 that terminates the line whose body starts at off:
+    the first 00 at a token boundary. The body is walked the way detok and
+    convert_body read it, so a 00 inside a token (a number payload, the
+    second byte of FF xx) is content and is stepped over with its token.
+    Strings, 8F E9 comments and DATA contents are raw text and end at the
+    first 00. Returns NO_TERM when the buffer ends before a terminator and
+    CUT_TOKEN when it ends inside a token's payload."""
+    i, n = off, len(d)
+    data = quote = False
+    while i < n:
+        b = d[i]
+        if b == 0:
+            return i
+        if data:                        # DATA: raw until an unquoted ':'
+            if b == 0x22: quote = not quote
+            elif b == 0x3A and not quote: data = False
+            i += 1; continue
+        if b == 0x22:                   # string literal
+            i += 1
+            while i < n and d[i] != 0x22 and d[i] != 0: i += 1
+            if i < n and d[i] == 0x22: i += 1
+            continue
+        if b == 0x8F and i + 1 < n and d[i+1] == 0xE9:
+            z = d.find(b'\x00', i + 2)          # comment: raw to the 00
+            return z if z >= 0 else NO_TERM
+        if b == 0xFF and i + 1 < n and d[i+1] == 0:
+            i += 1; continue            # FF 00 is no token: 00 terminates
+        w = token_width(b)
+        if i + w > n:
+            return CUT_TOKEN
+        if b == 0x84: data = True
+        i += w
+    return NO_TERM
 
 def parse_lines(d):
+    """[(line number, body bytes)] of a tokenized program. Raises
+    ValueError when d is not one. Every line, the last one included, is
+    framed the same way: its body runs from the header to the terminator
+    body_end finds, and what follows the terminator must be either the
+    end of the program (the 00 00 marker, or the file ending there) or
+    the next header, whose line number must be larger than this one's
+    and within 1..MAX_LINENO. Rejected: a truncated header, a line
+    number out of range or not increasing, a line with no terminator or
+    with a token cut off by the end of the file."""
     lines = []
-    p = 0
-    while p + 4 <= len(d):
-        link, no = struct.unpack_from('<HH', d, p)
-        if link == 0 or no == 0: break
-        # find next line start near link
-        nxt = None
-        for delta in LINK_PROBES:
-            cand = link + delta
-            if cand <= p + 4 or cand + 4 > len(d): continue
-            l2, n2 = struct.unpack_from('<HH', d, cand)
-            if no < n2 < no + 2000 and l2 > cand:
-                nxt = cand; break
-        if nxt is None:
-            # last line: framed by its own link, terminator excluded
-            lines.append((no, d[p+4:last_line_end(d, p + 4, link)]))
+    n = len(d)
+    if n < 4:
+        if any(d):
+            raise ValueError('not a tokenized program: truncated line '
+                             'header at offset 0x0')
+        return lines
+    if d[0] == 0 and d[1] == 0:         # end marker: empty program
+        return lines
+    p = prev = 0
+    while True:                         # a whole header is at p
+        no = d[p+2] | d[p+3] << 8
+        if no == 0 or no > MAX_LINENO:
+            raise ValueError('not a tokenized program: implausible line '
+                             f'number {no} at offset 0x{p:X}')
+        if no <= prev:
+            raise ValueError(f'line chain broken at offset 0x{p:X}: line '
+                             f'number {no} does not follow line {prev}')
+        term = body_end(d, p + 4)
+        if term == CUT_TOKEN:
+            raise ValueError(f'line {no} at offset 0x{p:X}: token cut off '
+                             'by the end of the file')
+        if term < 0:
+            raise ValueError(f'line {no} at offset 0x{p:X}: no 00 '
+                             'terminator before the end of the file')
+        lines.append((no, d[p+4:term]))
+        q = term + 1
+        if not any(d[q:q+2]):           # 00 00 marker, or the file ends
             break
-        body = d[p+4:nxt]
-        if body.endswith(b'\x00'): body = body[:-1]
-        lines.append((no, body))
-        p = nxt
+        if q + 4 > n:
+            raise ValueError(f'line chain broken after line {no}: truncated '
+                             f'line header at offset 0x{q:X}')
+        prev = no
+        p = q
     return lines
+
+def need(body, i, k):
+    """Raise ValueError unless the k payload bytes after body[i] exist
+    (src/p88conv.c convert_body returns -1 in the same places)."""
+    if i + k >= len(body):
+        raise ValueError(f'truncated token {body[i]:02X} at body offset {i}')
 
 def detok(body):
     out = []
@@ -194,6 +268,10 @@ def detok(body):
             in_str = True; out.append('"'); i += 1; continue
         if b == 0x8F and i + 1 < len(body) and body[i+1] == 0xE9:
             out.append("'"); raw = True; i += 2; continue
+        if b in (0x0B, 0x0C, 0x0E, 0x1C): need(body, i, 2)
+        if b == 0x0F: need(body, i, 1)
+        if b == 0x1D: need(body, i, 4)
+        if b == 0x1F: need(body, i, 8)
         if b == 0x0B:
             v = struct.unpack_from('<H', body, i+1)[0]; out.append(f'&O{v:o}'); i += 3; continue
         if b == 0x0C:
@@ -211,7 +289,7 @@ def detok(body):
         if b == 0x1F:
             out.append(mbf_double(body[i+1:i+9])); i += 9; continue
         if b == 0xFF:
-            t = body[i+1]
+            t = body[i+1] if i + 1 < len(body) else 0
             if t in FUNC: out.append(FUNC[t])
             elif t in (0xDD, 0xDE, 0xDF): out.append(f'<FF{t:02X}>')
             else: out.append(f'<FF{t:02X}>')
@@ -231,10 +309,19 @@ def detok(body):
     return ''.join(out)
 
 def main():
+    if len(sys.argv) != 2:
+        print(f'usage: {sys.argv[0]} <tokenized-file>', file=sys.stderr)
+        return 1
     path = sys.argv[1]
-    d = open(path, 'rb').read()
-    for no, body in parse_lines(d):
-        print(f'{no} {detok(body)}')
+    try:
+        d = open(path, 'rb').read()
+        text = [f'{no} {detok(body)}' for no, body in parse_lines(d)]
+    except (OSError, ValueError) as e:
+        print(f'p88_detok.py: {path}: {e}', file=sys.stderr)
+        return 1
+    for line in text:
+        print(line)
+    return 0
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
