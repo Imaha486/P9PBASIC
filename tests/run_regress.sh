@@ -26,7 +26,7 @@ note "build"
 EMBED_OBJS=$(ls build-embed/*.o | grep -v embed_test \
              | grep -v textmerge_test | grep -v window_test \
              | grep -v subsys_test | grep -v dramload_test | grep -v pcmb_ports_test \
-             | grep -v kanjifont_test)
+             | grep -v kanjifont_test | grep -v gfxmirror_test)
 unit_test() { # name [args...]
   _t=$1; shift
   cc -O1 -std=gnu11 -Isrc -Ithird_party/z80 -c "tools/$_t.c" \
@@ -40,6 +40,7 @@ unit_test textmerge_test
 unit_test window_test
 unit_test kanjifont_test
 unit_test pcmb_ports_test
+unit_test gfxmirror_test
 echo "build ok"
 
 if [ ! -f "$DISK" ]; then
@@ -155,7 +156,7 @@ DR=$(sed -n 's/.*dropped=\([0-9]*\).*/\1/p' "$WORK/embed40.log")
 if [ -n "$D" ] && [ -f "$D/vram0.bin" ]; then
   python3 - "$D" <<'EOF' || bad "embed40: VRAM plane counts changed"
 import sys
-want = [7054, 7111, 7876]
+want = [7054, 7149, 7876]
 got = []
 for b in range(3):
     data = open("%s/vram%d.bin" % (sys.argv[1], b), "rb").read()

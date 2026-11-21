@@ -11,6 +11,7 @@ void hal_term(void);
 void hal_tput(int x, int y, unsigned short vcode, unsigned char attr); /* raw VRAM word */
 void hal_cursor(int x, int y, int visible, int insmode);
 void hal_width40(int on);
+void hal_gfx200(int on);        /* 1 = interpreter is in a 200-line SCREEN mode */
 void hal_trow(int y, const unsigned short *codes, const unsigned char *attrs, int n);
 
 /* ---- keyboard ---- */

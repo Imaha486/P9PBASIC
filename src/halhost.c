@@ -88,6 +88,7 @@ void hal_trow(int y, const unsigned short *codes, const unsigned char *attrs, in
 
 void hal_cursor(int x, int y, int v, int ins) { (void)x; (void)y; (void)v; (void)ins; }
 void hal_width40(int on) { w40 = on; }
+void hal_gfx200(int on) { (void)on; }
 
 /* key script: chars; escapes \r \n \e(ESC) \s(STOP) \u \d \l \R(right) \1..\9 \0 (F1..F10) \w (wait 1 tick) */
 static int pending = -1;

@@ -150,11 +150,43 @@ void hal_gon(int on) { gon_flag = on; }
 void hal_ton(int on) { ton_flag = on; }
 int halp8_gfx_visible(void) { return gon_flag; }
 int halp8_text_visible(void) { return ton_flag; }
-void hal_gpage(int a, int d) { ap = a; dp = d; }
-void hal_gpset(int x, int y, int c) { if (x >= 0 && x < 640 && y >= 0 && y < 400) gv[ap][y][x] = (unsigned char)c; }
-int hal_gpoint(int x, int y) { if (x >= 0 && x < 640 && y >= 0 && y < 400) return gv[ap][y][x]; return -1; }
+/* Writes to the displayed page are mirrored into the vessel's GVRAM
+ * (one shared VRAM on the genuine machine); a hidden page is not.
+ * The vessel has 200 lines and 3 planes, so mirroring happens only
+ * in the interpreter's 200-line modes (hal_gfx200), and colors
+ * above 7 clear the vessel bits so the interpreter's own color
+ * shows through the frame compositor. */
+static int gfx200 = 0;
+void hal_gfx200(int on) { gfx200 = on; }
+static int vcol(int c) { return (c >= 0 && c <= 7) ? c : 0; }
+void hal_gpage(int a, int d)
+{
+    int changed = (d != dp);
+    ap = a; dp = d;
+    if (changed && gfx200 && dp >= 0 && dp < 2) {
+        /* Display page changed: resync the single GVRAM from it.
+         * One vessel line serves the frame row pair (2y, 2y+1); in
+         * 200-line mode the interpreter writes both rows of a pair
+         * identically, so sample the even row - reading both rows
+         * would let the odd row erase the even one's pixels. */
+        int x, y;
+        for (y = 0; y < 200; y++)
+            for (x = 0; x < 640; x++)
+                vessel_vram_pset(x, y * 2, vcol(gv[dp][y * 2][x]));
+    }
+}
+void hal_gpset(int x, int y, int c) { if (x >= 0 && x < 640 && y >= 0 && y < 400) { gv[ap][y][x] = (unsigned char)c; if (ap == dp && gfx200 && c >= 0) vessel_vram_pset(x, y, vcol(c)); } }
+/* On the displayed page a non-zero vessel pixel wins, as in the frame. */
+int hal_gpoint(int x, int y)
+{
+    if (x >= 0 && x < 640 && y >= 0 && y < 400) {
+        if (ap == dp && gfx200) { int v = vessel_vram_gpoint(x, y); if (v != 0) return v; }
+        return gv[ap][y][x];
+    }
+    return -1;
+}
 void hal_ghline(int x1, int x2, int y, int c) { int x; for (x = x1; x <= x2; x++) hal_gpset(x, y, c); }
-void hal_gclear(int c) { memset(gv[ap], c, sizeof(gv[0])); }
+void hal_gclear(int c) { memset(gv[ap], c, sizeof(gv[0])); if (ap == dp && gfx200 && c >= 0) vessel_vram_clear(vcol(c)); }
 
 static int pal[16][3];
 static int pal_init = 0;

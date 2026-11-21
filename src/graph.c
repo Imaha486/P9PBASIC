@@ -66,6 +66,7 @@ void g_init(void)
     hal_analog(1);
     default_palette();
     g_mode = 3;
+    hal_gfx200(0);
     vx1 = 0; vy1 = 0; vx2 = 639; vy2 = 399;
     hal_gpage(0, 0);
     hal_gclear(0);
@@ -119,11 +120,20 @@ void stmt_screen(void)
     }
     if (mode < 0 || mode > 3 || ap < 0 || ap > 1 || dp < 0 || dp > 3) berror(E_ILLEGAL_FN);
     if (mode != g_mode) {
+        int was200 = (lines_of() == 200);
         g_mode = mode;
         vx1 = 0; vy1 = 0; vx2 = 639; vy2 = lines_of() - 1;
         win_on = 0;
+        /* The mode-change clear must reach the vessel GVRAM when
+         * either the old or the new mode is a 200-line mode: leaving
+         * 200-line mode with the mirror already off would leave
+         * mirrored pixels visible under the new mode, and entering
+         * it must wipe the shared VRAM the clear covers. Enable the
+         * mirror for the clear, then set it to the new mode's state. */
+        hal_gfx200(was200 || lines_of() == 200);
         hal_gpage(0, 0);
         hal_gclear(0);
+        hal_gfx200(lines_of() == 200);
     }
     /* display page is a bit mask: bit0 = page 0, bit1 = page 1 (0 = none) */
     g_apage = ap; g_dpage = dp;

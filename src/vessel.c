@@ -500,6 +500,48 @@ const unsigned char *vessel_vram_plane(int bank)
     return gvram[bank];
 }
 
+/* Write-through for the interpreter's graphics statements: on the
+ * genuine machine BASIC and the guest draw into the same GVRAM, so
+ * a BASIC erase must also clear what the guest plotted. x is
+ * 0..639, y is in 400-line frame coordinates (two frame lines per
+ * VRAM line). Color bits that are 0 clear the plane bit. */
+void vessel_vram_pset(int x, int y, int c)
+{
+    unsigned addr;
+    unsigned char bit;
+    int p;
+    if (x < 0 || x >= 640 || y < 0 || y >= 400) return;
+    addr = (unsigned)((y >> 1) * 80 + (x >> 3));
+    bit = (unsigned char)(0x80 >> (x & 7));
+    for (p = 0; p < 3; p++) {
+        if ((c >> p) & 1) gvram[p][addr] |= bit;
+        else gvram[p][addr] &= (unsigned char)~bit;
+    }
+}
+
+/* Whole-screen fill with color c: only the visible 80x200 bytes of
+ * each plane (the tail up to 0x4000 is guest-addressable memory a
+ * BASIC clear must not touch). */
+void vessel_vram_clear(int c)
+{
+    int p;
+    for (p = 0; p < 3; p++)
+        memset(gvram[p], ((c >> p) & 1) ? 0xFF : 0x00, 80 * 200);
+}
+
+/* Pixel read in the same frame coordinates as vessel_vram_pset:
+ * the 3-plane color index 0..7, 0 when out of range. */
+int vessel_vram_gpoint(int x, int y)
+{
+    unsigned addr;
+    int p, sh, v = 0;
+    if (x < 0 || x >= 640 || y < 0 || y >= 400) return 0;
+    addr = (unsigned)((y >> 1) * 80 + (x >> 3));
+    sh = 7 - (x & 7);
+    for (p = 0; p < 3; p++) v |= ((gvram[p][addr] >> sh) & 1) << p;
+    return v;
+}
+
 /* OPNA (YM2608) register file. Both PC-88 port pairs are tracked:
  * 44h/45h + 46h/47h and A8h-A9h + AAh/ABh (bank 0 / bank 1).
  * Bank 0 registers 26h (Timer B counter) and 27h (timer control)

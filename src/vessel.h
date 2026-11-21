@@ -15,6 +15,9 @@ long vessel_call(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned 
 long vessel_call_pushed(unsigned entry, unsigned a, unsigned hl, unsigned bc, unsigned de, unsigned pushed); /* call with preset registers */
 int  vessel_d88_sector(int t, int r, unsigned char *dst); /* raw D88 sector (t = cyl*2+head) */
 const unsigned char *vessel_vram_plane(int bank); /* graphics VRAM planes 0=B,1=R,2=G; 80x200 bytes each */
+void vessel_vram_pset(int x, int y, int c);   /* interpreter write-through; y in 400-line frame coordinates */
+void vessel_vram_clear(int c);                /* interpreter write-through: fill the visible 80x200 bytes of all planes with color c */
+int  vessel_vram_gpoint(int x, int y);        /* 3-plane color index 0..7 at frame coordinates; 0 when out of range */
 void vessel_palette(int idx, int *r, int *g, int *b); /* palette registers 0..7, out 0..255 */
 void vessel_set_palette(int idx, int r7, int g7, int b7); /* components 0..7 */
 int  vessel_disk_read(int img, int ltrack, int sector, int count, unsigned addr);

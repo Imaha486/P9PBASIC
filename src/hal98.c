@@ -232,6 +232,8 @@ void hal_trow(int y, const unsigned short *codes, const unsigned char *attrs, in
     }
 }
 
+void hal_gfx200(int on) { (void)on; }
+
 void hal_width40(int on)
 {
     w40 = on;
